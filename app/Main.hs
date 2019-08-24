@@ -3,6 +3,7 @@
 
 module Main where
 
+import           App
 import           Control.Concurrent
 import           Control.Concurrent.Async
 import           Control.Concurrent.STM.TChan
@@ -15,6 +16,7 @@ import           Data.IORef
 import           Data.List.Split
 import           Data.Maybe
 import           Data.String
+import           Log
 import           MlOptions
 import           Options.Applicative
 import           Raft
@@ -23,27 +25,6 @@ import           System.IO
 import           System.Random
 import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
 import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
-
-data Node = Node
-    { nodeId :: String
-    , nodeHost :: String
-    , nodePort :: String
-    , nodeAddr :: SockAddr
-    } deriving Show
-
-newtype ClusterConfig = ClusterConfig { ccPeers :: [Node] }
-
-data App = App
-    { appNodeId    :: String
-    , appNodes     :: [Node]
-    , appNodeState :: IORef NodeState
-    , appSocket  :: Socket
-    }
-
-type AppT = ReaderT App IO
-
-runApp :: App -> AppT () -> IO ()
-runApp = flip runReaderT
 
 sendToNode' :: Socket -> Node -> Message -> IO ()
 sendToNode' sock node msg = do
@@ -61,27 +42,37 @@ sendToNode pred msg = do
 
 -- sendToNode (withId "blah")
 withId :: String -> Node -> Bool
-withId nId = (nId ==) . nodeId
+withId = flip $ (==) . nodeId
 
-everyOne :: Node -> Bool
-everyOne = const True
+everyone :: Node -> Bool
+everyone = const True
+
+everyoneBut :: String -> Node -> Bool
+everyoneBut = flip $ (/=) . nodeId
 
 processOptions :: Options -> IO App
 processOptions Options{..} = do
     appNodeState <- newIORef startState
 
-    when (length optPeers < 3) $ die
-        $  "The number of nodes on the network must be at lest 3.\n"
-        <> "You must use third \"arbiter\" node to elect a leader among two nodes.\n"
-        <> "If you have only a single node, you don't need to elect a leader.\n"
-        <> "If you have no nodes, you have no problems.\n"
+    let appLogLevel = optLogLevel
+    let appLogTime = optLogTime
+
+    when (length optPeers < 3) $ do
+        logWith' appLogTime LogError appLogLevel
+            $  "The number of nodes on the network must be at lest 3. "
+            <> "You must use third \"arbiter\" node to elect a leader among two nodes. "
+            <> "If you have only a single node, you don't need to elect a leader. "
+            <> "If you have no nodes, you have no problems. "
+        exitFailure
 
     appNodes <- forM optPeers $ \pStr -> do
         let parts = splitOn ":" pStr
 
-        when (length parts /= 2 && length parts /= 3) $ die
-            $  "Error parsing node descriptor "
-            <> pStr <> ", use format NODE_ID:HOST:PORT or NODE_ID:HOST."
+        when (length parts /= 2 && length parts /= 3) $ do
+            logWith' appLogTime LogError appLogLevel
+                $  "Error parsing node descriptor "
+                <> pStr <> ", use format NODE_ID:HOST:PORT or NODE_ID:HOST."
+            exitFailure
 
         let nodeId   = parts !! 0
         let nodeHost = parts !! 1
@@ -95,28 +86,29 @@ processOptions Options{..} = do
             (Just nodeHost)
             (Just nodePort)
 
-        when (length addrinfos <= 0) $ die
-            $  "Could not resolve host in node descriptor "
-            <> pStr <> "."
+        when (length addrinfos <= 0) $ do
+            logWith' appLogTime LogError appLogLevel
+                $  "Could not resolve host in node descriptor "
+                <> pStr <> "."
+            exitFailure
 
         let nodeAddr = addrAddress $head addrinfos
-
-        --nodeSocket <- socket (addrFamily nodeAddr) Datagram defaultProtocol
-        --connect nodeSocket (addrAddress nodeAddr)
 
         return Node{..}
 
     addrinfos <- getAddrInfo Nothing (Just $ optBindIp) (Just $ optBindPort)
 
-    when (length addrinfos <= 0) $ die
-        $  "Could not bind to " <> optBindIp <> ":"
-        <> optBindPort <> ", getaddrinfo returned an empty list."
+    when (length addrinfos <= 0) $ do
+        logWith' appLogTime LogError appLogLevel
+            $  "Could not bind to " <> optBindIp <> ":"
+            <> optBindPort <> ", getaddrinfo returned an empty list."
+        exitFailure
 
     let bindAddr = head addrinfos
     appSocket <- socket (addrFamily bindAddr) Datagram defaultProtocol
     bind appSocket (addrAddress bindAddr)
 
-    putStrLn "Joining the network..."
+    logWith' appLogTime LogInfo appLogLevel "Joining the network..."
 
     nonce <- randomRIO (0, 2^128) :: IO Integer
 
@@ -128,10 +120,12 @@ processOptions Options{..} = do
         $ waitForJoin nonce appSocket
 
     appNodeId <- case eAppIdU of
-        Left () -> die "Could not discover node ID. Am I in the node list?"
+        Left () -> do
+            logWith' appLogTime LogError appLogLevel "Could not discover node ID. Am I on the node list?"
+            exitFailure
         Right nId -> return nId
 
-    putStrLn $ "SUCCESS. Our node ID is " <> appNodeId
+    logWith' appLogTime LogInfo appLogLevel $ "SUCCESS. Our node ID is " <> appNodeId
 
     return App{..}
 
@@ -152,9 +146,11 @@ main = do
 
     app <- processOptions opts
 
-    putStrLn "Listening to incoming messages..."
+    runApp app $ do
+        logInfo "Listening to incoming messages..."
 
-    forkIO $ forever $ do
-        recv (appSocket app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
+        liftIO $ forkIO $ forever $ do
+            recv (appSocket app) 4096 >>= \message -> runApp app $ do
+                logInfo $ show (decode $ BSL.fromStrict message :: Message)
 
-    putStrLn "Done."
+        logInfo "Done."

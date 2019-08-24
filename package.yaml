@@ -30,6 +30,7 @@ dependencies:
 - random
 - split
 - stm
+- time
 library:
   source-dirs: src
 

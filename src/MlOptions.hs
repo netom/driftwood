@@ -1,10 +1,38 @@
 module MlOptions
     ( Options(..)
+    , LogLevel(..)
     , options
     , defaultPort
     )where
 
-import Options.Applicative
+import           Data.List
+import           Data.Maybe
+import           Options.Applicative
+
+data LogLevel
+        = LogDebug
+        | LogInfo
+        | LogWarn
+        | LogError
+        deriving (Eq, Ord)
+
+instance Show LogLevel where
+    show LogDebug = "debug"
+    show LogInfo  = "info"
+    show LogWarn  = "warn"
+    show LogError = "error"
+
+instance Read LogLevel where
+    readsPrec _ input = catMaybes
+        [ checkCase LogDebug input
+        , checkCase LogInfo input
+        , checkCase LogWarn input
+        , checkCase LogError input
+        ]
+        where
+            checkCase ll i = if sll `isPrefixOf` i then Just (ll, drop (length sll) i) else Nothing
+                where
+                    sll = show ll
 
 data Options = Options
     { optBindIp   :: String
@@ -13,6 +41,8 @@ data Options = Options
     , optDiscoveryRetryWait :: Int
     , optArbiter  :: Bool
     , optPeers    :: [String]
+    , optLogLevel :: LogLevel
+    , optLogTime  :: Bool
     } deriving Show
 
 defaultPort = "10987"
@@ -59,6 +89,18 @@ options = info
                 <> short 'n'
                 <> metavar "NODE"
                 <> help "An other node in the network."
+                )
+            <*> (  option auto
+                $  long "loglevel"
+                <> short 'l'
+                <> value LogDebug
+                <> metavar "LOGLEVEL"
+                <> help ("Any of the following log levels: debug, info, warn, error")
+                )
+            <*> (  switch 
+                $ long "log-time"
+                <> short 't'
+                <> help "Log time."
                 )
     )) (
         fullDesc
