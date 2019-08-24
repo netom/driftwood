@@ -20,14 +20,14 @@ import           Options.Applicative
 import           Raft
 import           System.Exit
 import           System.IO
-import           Network.Socket hiding     (recv, send, defaultPort)
-import           Network.Socket.ByteString (recv, send, sendAll)
+import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
+import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
 
 data Node = Node
     { nodeId :: String
     , nodeHost :: String
     , nodePort :: String
-    , nodeSocket :: Socket
+    , nodeAddr :: SockAddr
     } deriving Show
 
 newtype ClusterConfig = ClusterConfig { ccPeers :: [Node] }
@@ -36,7 +36,8 @@ data App = App
     { appNodeId    :: String
     , appNodes     :: [Node]
     , appNodeState :: IORef NodeState
-    , appSocket    :: Socket
+    , appSocketIn  :: Socket
+    , appSocketOut :: Socket
     }
 
 type AppT = ReaderT App IO
@@ -44,9 +45,9 @@ type AppT = ReaderT App IO
 runApp :: App -> AppT () -> IO ()
 runApp = flip runReaderT
 
-sendToNode' :: Node -> Message -> IO ()
-sendToNode' node msg = do
-    _ <- send (nodeSocket node) $ BSL.toStrict $ encode msg
+sendToNode' :: Socket -> Node -> Message -> IO ()
+sendToNode' sock node msg = do
+    _ <- sendTo sock (BSL.toStrict $ encode msg) $ nodeAddr node
     return ()
 
 sendToNode :: (Node -> Bool) -> Message -> AppT ()
@@ -54,8 +55,9 @@ sendToNode pred msg = do
     -- TODO: a hashmap would prolly be better.
     -- The first person to run more than 1K nodes please open an issue.
     ps <- asks appNodes
+    sock <- asks appSocketOut
     liftIO $ forM_ ps $ \node -> do
-        when (pred node) $ sendToNode' node msg
+        when (pred node) $ sendToNode' sock node msg
 
 -- sendToNode (withId "blah")
 withId :: String -> Node -> Bool
@@ -98,10 +100,10 @@ processOptions Options{..} = do
             $  "Could not resolve host in node descriptor "
             <> pStr <> "."
 
-        let nodeAddr = head addrinfos
+        let nodeAddr = addrAddress $head addrinfos
 
-        nodeSocket <- socket (addrFamily nodeAddr) Datagram defaultProtocol
-        connect nodeSocket (addrAddress nodeAddr)
+        --nodeSocket <- socket (addrFamily nodeAddr) Datagram defaultProtocol
+        --connect nodeSocket (addrAddress nodeAddr)
 
         return Node{..}
 
@@ -112,24 +114,24 @@ processOptions Options{..} = do
         <> optBindPort <> ", getaddrinfo returned an empty list."
 
     let bindAddr = head addrinfos
-    appSocket <- socket (addrFamily bindAddr) Datagram defaultProtocol
-    bind appSocket (addrAddress bindAddr)
+    appSocketIn <- socket (addrFamily bindAddr) Datagram defaultProtocol
+    bind appSocketIn (addrAddress bindAddr)
+
+    appSocketOut <- socket (addrFamily bindAddr) Datagram defaultProtocol
 
     putStrLn "Joining the network..."
 
     -- TODO: randomize token
     let token = "SssoooooRRRRandom"
 
-    let eAppIdU = Right "NODEID"
-
-{-     eAppIdU <- race
+    eAppIdU <- race
         -- TODO: retry count option? retry wait time option?
         ( forM_ [1..5] $ \_ -> do
-            forM_ appNodes $ \n -> sendToNode' n $ Ping (nodeId n) token
+            forM_ appNodes $ \n -> sendToNode' appSocketOut n $ Ping (nodeId n) token
             threadDelay 100000
         )
-        $ waitForPing token appSocket
- -}
+        $ waitForPing token appSocketIn
+
     appNodeId <- case eAppIdU of
         Left () -> die "Could not discover node ID. Am I in the node list?"
         Right nId -> return nId
@@ -158,7 +160,7 @@ main = do
     putStrLn "Listening to incoming messages..."
 
     forkIO $ forever $ do
-        recv (appSocket app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
+        recv (appSocketIn app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
 
     runApp app $ do
         sendToNode everyOne $ Ping "Duh" "Message!"
