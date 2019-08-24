@@ -9,6 +9,8 @@ import Options.Applicative
 data Options = Options
     { optBindIp   :: String
     , optBindPort :: String
+    , optDiscoveryRetryCount :: Int
+    , optDiscoveryRetryWait :: Int
     , optArbiter  :: Bool
     , optPeers    :: [String]
     } deriving Show
@@ -32,6 +34,20 @@ options = info
                 <> value defaultPort
                 <> metavar "PORT"
                 <> help ("The port to bind to. Defaults to " <> defaultPort <> ".")
+                )
+            <*> (  option auto
+                $  long "discovery-retry-count"
+                <> short 'c'
+                <> value 5
+                <> metavar "RETRY"
+                <> help ("The number of retries during the initial discovery phase. Default is 5.")
+                )
+            <*> (  option auto
+                $  long "discovery-wait-time"
+                <> short 'w'
+                <> value 100000
+                <> metavar "WAIT"
+                <> help ("The number of microseconds to wait during the initial discovery phase. Default is 100,000.")
                 )
             <*> (  switch 
                 $ long "arbiter"

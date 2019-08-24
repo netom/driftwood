@@ -125,10 +125,9 @@ processOptions Options{..} = do
     nonce <- randomRIO (0, 2^128) :: IO Integer
 
     eAppIdU <- race
-        -- TODO: retry count option? retry wait time option?
-        ( forM_ [1..5] $ \_ -> do
+        ( forM_ [0..optDiscoveryRetryCount] $ \_ -> do
             forM_ appNodes $ \n -> sendToNode' appSocketOut n $ Ping nonce (nodeId n)
-            threadDelay 100000
+            threadDelay optDiscoveryRetryWait
         )
         $ waitForPing nonce appSocketIn
 
