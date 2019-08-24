@@ -37,8 +37,7 @@ data App = App
     { appNodeId    :: String
     , appNodes     :: [Node]
     , appNodeState :: IORef NodeState
-    , appSocketIn  :: Socket
-    , appSocketOut :: Socket
+    , appSocket  :: Socket
     }
 
 type AppT = ReaderT App IO
@@ -56,7 +55,7 @@ sendToNode pred msg = do
     -- TODO: a hashmap would prolly be better.
     -- The first person to run more than 1K nodes please open an issue.
     ps <- asks appNodes
-    sock <- asks appSocketOut
+    sock <- asks appSocket
     liftIO $ forM_ ps $ \node -> do
         when (pred node) $ sendToNode' sock node msg
 
@@ -71,9 +70,8 @@ processOptions :: Options -> IO App
 processOptions Options{..} = do
     appNodeState <- newIORef startState
 
-    when (length optPeers < 2) $ die
-        $  "The number of peers must be at least 2.\n"
-        <> "(the number of nodes on the network must be at lest 3).\n"
+    when (length optPeers < 3) $ die
+        $  "The number of nodes on the network must be at lest 3.\n"
         <> "You must use third \"arbiter\" node to elect a leader among two nodes.\n"
         <> "If you have only a single node, you don't need to elect a leader.\n"
         <> "If you have no nodes, you have no problems.\n"
@@ -115,10 +113,8 @@ processOptions Options{..} = do
         <> optBindPort <> ", getaddrinfo returned an empty list."
 
     let bindAddr = head addrinfos
-    appSocketIn <- socket (addrFamily bindAddr) Datagram defaultProtocol
-    bind appSocketIn (addrAddress bindAddr)
-
-    appSocketOut <- socket (addrFamily bindAddr) Datagram defaultProtocol
+    appSocket <- socket (addrFamily bindAddr) Datagram defaultProtocol
+    bind appSocket (addrAddress bindAddr)
 
     putStrLn "Joining the network..."
 
@@ -126,10 +122,10 @@ processOptions Options{..} = do
 
     eAppIdU <- race
         ( forM_ [0..optDiscoveryRetryCount] $ \_ -> do
-            forM_ appNodes $ \n -> sendToNode' appSocketOut n $ Ping nonce (nodeId n)
+            forM_ appNodes $ \n -> sendToNode' appSocket n $ Join nonce (nodeId n)
             threadDelay optDiscoveryRetryWait
         )
-        $ waitForPing nonce appSocketIn
+        $ waitForJoin nonce appSocket
 
     appNodeId <- case eAppIdU of
         Left () -> die "Could not discover node ID. Am I in the node list?"
@@ -140,15 +136,15 @@ processOptions Options{..} = do
     return App{..}
 
     where
-        waitForPing :: Integer -> Socket -> IO String
-        waitForPing nonce sock = do
+        waitForJoin :: Integer -> Socket -> IO String
+        waitForJoin nonce sock = do
             msgBS <- recv sock 4096
             let msg = decode $ BSL.fromStrict msgBS
             -- TODO: what if decode fails?
             case msg of
-                Ping nonce nId -> return nId
+                Join nonce nId -> return nId
                 -- TODO: nicer solution instead of explicit recursion
-                _ -> waitForPing nonce sock
+                _ -> waitForJoin nonce sock
 
 main :: IO ()
 main = do
@@ -159,11 +155,6 @@ main = do
     putStrLn "Listening to incoming messages..."
 
     forkIO $ forever $ do
-        recv (appSocketIn app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
-
-    runApp app $ do
-        sendToNode everyOne $ Ping 0 "Message!"
-
-    threadDelay 10000000
+        recv (appSocket app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
 
     putStrLn "Done."

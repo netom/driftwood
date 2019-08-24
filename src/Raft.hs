@@ -37,7 +37,7 @@ data Message
         , msgTerm    :: Int
         , msgGranted :: Bool
         }
-    | Ping
+    | Join
         { msgNonce :: Integer
         , msgNodeId  :: String
         }
