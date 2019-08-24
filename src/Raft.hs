@@ -38,8 +38,8 @@ data Message
         , msgGranted :: Bool
         }
     | Ping
-        { msgNodeId  :: String
-        , msgPayload :: String
+        { msgNonce :: Integer
+        , msgNodeId  :: String
         }
     deriving (Show, Generic)
 

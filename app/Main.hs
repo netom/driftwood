@@ -20,6 +20,7 @@ import           Options.Applicative
 import           Raft
 import           System.Exit
 import           System.IO
+import           System.Random
 import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
 import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
 
@@ -121,35 +122,34 @@ processOptions Options{..} = do
 
     putStrLn "Joining the network..."
 
-    -- TODO: randomize token
-    let token = "SssoooooRRRRandom"
+    nonce <- randomRIO (0, 2^128) :: IO Integer
 
     eAppIdU <- race
         -- TODO: retry count option? retry wait time option?
         ( forM_ [1..5] $ \_ -> do
-            forM_ appNodes $ \n -> sendToNode' appSocketOut n $ Ping (nodeId n) token
+            forM_ appNodes $ \n -> sendToNode' appSocketOut n $ Ping nonce (nodeId n)
             threadDelay 100000
         )
-        $ waitForPing token appSocketIn
+        $ waitForPing nonce appSocketIn
 
     appNodeId <- case eAppIdU of
         Left () -> die "Could not discover node ID. Am I in the node list?"
         Right nId -> return nId
 
-    putStrLn $ "SUCCESS. Out node ID is " <> appNodeId
+    putStrLn $ "SUCCESS. Our node ID is " <> appNodeId
 
     return App{..}
 
     where
-        waitForPing :: String -> Socket -> IO String
-        waitForPing token sock = do
+        waitForPing :: Integer -> Socket -> IO String
+        waitForPing nonce sock = do
             msgBS <- recv sock 4096
             let msg = decode $ BSL.fromStrict msgBS
             -- TODO: what if decode fails?
             case msg of
-                Ping nId token -> return nId
+                Ping nonce nId -> return nId
                 -- TODO: nicer solution instead of explicit recursion
-                _ -> waitForPing token sock
+                _ -> waitForPing nonce sock
 
 main :: IO ()
 main = do
@@ -163,7 +163,7 @@ main = do
         recv (appSocketIn app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
 
     runApp app $ do
-        sendToNode everyOne $ Ping "Duh" "Message!"
+        sendToNode everyOne $ Ping 0 "Message!"
 
     threadDelay 10000000
 
