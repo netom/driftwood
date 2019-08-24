@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
-module Lib
-    ( someFunc
+module Raft
+    (
     ) where
 
 data Role
@@ -10,8 +10,7 @@ data Role
     | Follower
 
 -- start: follower
--- time out, start election: follower -> candidate
--- time out, new election: candidate -> candidate
+-- time out, start election: ? -> candidate
 -- received majority of votes: candidate -> leader
 -- step down: leader -> follower
 -- discover current leader or higher term: candidate -> follower
@@ -40,7 +39,15 @@ data NodeState = NodeState
     , role :: Role
     }
 
-startState = NodeState 0 True Follower
+start = NodeState 0 True Follower
+
+timeOutStartElection = undefined
+
+receivedMajority = undefined
+
+stepDown = undefined
+
+discoverLeaderOrNewTerm t = NodeState t False Follower
 
 -- node process:
 -- listen on TChan for Messages
