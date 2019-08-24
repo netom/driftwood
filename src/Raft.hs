@@ -29,13 +29,17 @@ data Role
 
 data Message
     = VoteRequest
-        { nodeId :: Int
-        , term :: Int
+        { msgNodeId :: String
+        , msgTerm   :: Int
         }
     | Vote
-        { nodeId :: Int
-        , term :: Int
-        , voteGranted :: Bool
+        { msgNodeId  :: String
+        , msgTerm    :: Int
+        , msgGranted :: Bool
+        }
+    | Ping
+        { msgNodeId  :: String
+        , msgPayload :: String
         }
     deriving (Show, Generic)
 

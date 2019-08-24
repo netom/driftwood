@@ -7,8 +7,7 @@ module MlOptions
 import Options.Applicative
 
 data Options = Options
-    { optNodeId      :: String
-    , optBindIp   :: String
+    { optBindIp   :: String
     , optBindPort :: String
     , optArbiter  :: Bool
     , optPeers    :: [String]
@@ -20,11 +19,7 @@ options :: ParserInfo Options
 options = info
     (helper <*> (
         Options
-            <$> (  argument str
-                $  metavar "NODE_ID"
-                <> help "The unique ID of this node."
-                )
-            <*> (  strOption
+            <$> (  strOption
                 $  long "ip"
                 <> short 'i'
                 <> value "0.0.0.0"

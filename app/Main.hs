@@ -4,6 +4,8 @@
 module Main where
 
 import           Control.Concurrent
+import           Control.Concurrent.Async
+import           Control.Concurrent.STM.TChan
 import           Control.Monad
 import           Control.Monad.Reader
 import           Data.Binary
@@ -18,8 +20,8 @@ import           Options.Applicative
 import           Raft
 import           System.Exit
 import           System.IO
-import           Network.Socket hiding     (recv, defaultPort)
-import           Network.Socket.ByteString (recv, sendAll)
+import           Network.Socket hiding     (recv, send, defaultPort)
+import           Network.Socket.ByteString (recv, send, sendAll)
 
 data Node = Node
     { nodeId :: String
@@ -32,21 +34,35 @@ newtype ClusterConfig = ClusterConfig { ccPeers :: [Node] }
 
 data App = App
     { appNodeId    :: String
-    , appPeers     :: [Node]
+    , appNodes     :: [Node]
     , appNodeState :: IORef NodeState
+    , appSocket    :: Socket
     }
 
 type AppT = ReaderT App IO
 
-runApp :: AppT () -> App -> IO ()
-runApp = runReaderT
+runApp :: App -> AppT () -> IO ()
+runApp = flip runReaderT
 
-broadcast :: Message -> AppT ()
-broadcast message = do
-    ps <- asks appPeers
-    let encMsg = BSL.toStrict $ encode message
-    liftIO $ forM_ ps $ \Node{..} -> do
-        sendAll nodeSocket encMsg
+sendToNode' :: Node -> Message -> IO ()
+sendToNode' node msg = do
+    _ <- send (nodeSocket node) $ BSL.toStrict $ encode msg
+    return ()
+
+sendToNode :: (Node -> Bool) -> Message -> AppT ()
+sendToNode pred msg = do
+    -- TODO: a hashmap would prolly be better.
+    -- The first person to run more than 1K nodes please open an issue.
+    ps <- asks appNodes
+    liftIO $ forM_ ps $ \node -> do
+        when (pred node) $ sendToNode' node msg
+
+-- sendToNode (withId "blah")
+withId :: String -> Node -> Bool
+withId nId = (nId ==) . nodeId
+
+everyOne :: Node -> Bool
+everyOne = const True
 
 processOptions :: Options -> IO App
 processOptions Options{..} = do
@@ -59,7 +75,7 @@ processOptions Options{..} = do
         <> "If you have only a single node, you don't need to elect a leader.\n"
         <> "If you have no nodes, you have no problems.\n"
 
-    appPeers <- forM optPeers $ \pStr -> do
+    appNodes <- forM optPeers $ \pStr -> do
         let parts = splitOn ":" pStr
 
         when (length parts /= 2 && length parts /= 3) $ die
@@ -73,7 +89,10 @@ processOptions Options{..} = do
             then return $ parts !! 2
             else return defaultPort
 
-        addrinfos <- getAddrInfo Nothing (Just nodeHost) (Just nodePort)
+        addrinfos <- getAddrInfo
+            (Just defaultHints { addrSocketType = Datagram })
+            (Just nodeHost)
+            (Just nodePort)
 
         when (length addrinfos <= 0) $ die
             $  "Could not resolve host in node descriptor "
@@ -86,8 +105,49 @@ processOptions Options{..} = do
 
         return Node{..}
 
-    let appNodeId = optNodeId
+    addrinfos <- getAddrInfo Nothing (Just $ optBindIp) (Just $ optBindPort)
+
+    when (length addrinfos <= 0) $ die
+        $  "Could not bind to " <> optBindIp <> ":"
+        <> optBindPort <> ", getaddrinfo returned an empty list."
+
+    let bindAddr = head addrinfos
+    appSocket <- socket (addrFamily bindAddr) Datagram defaultProtocol
+    bind appSocket (addrAddress bindAddr)
+
+    putStrLn "Joining the network..."
+
+    -- TODO: randomize token
+    let token = "SssoooooRRRRandom"
+
+    let eAppIdU = Right "NODEID"
+
+{-     eAppIdU <- race
+        -- TODO: retry count option? retry wait time option?
+        ( forM_ [1..5] $ \_ -> do
+            forM_ appNodes $ \n -> sendToNode' n $ Ping (nodeId n) token
+            threadDelay 100000
+        )
+        $ waitForPing token appSocket
+ -}
+    appNodeId <- case eAppIdU of
+        Left () -> die "Could not discover node ID. Am I in the node list?"
+        Right nId -> return nId
+
+    putStrLn $ "SUCCESS. Out node ID is " <> appNodeId
+
     return App{..}
+
+    where
+        waitForPing :: String -> Socket -> IO String
+        waitForPing token sock = do
+            msgBS <- recv sock 4096
+            let msg = decode $ BSL.fromStrict msgBS
+            -- TODO: what if decode fails?
+            case msg of
+                Ping nId token -> return nId
+                -- TODO: nicer solution instead of explicit recursion
+                _ -> waitForPing token sock
 
 main :: IO ()
 main = do
@@ -95,24 +155,14 @@ main = do
 
     app <- processOptions opts
 
-    {-  
-    if optArbiter opts
-    then do
-        addrinfos <- getAddrInfo Nothing (Just optBindIp) (Just optBindPort)
-        let serveraddr = head addrinfos
-        sock <- socket (addrFamily serveraddr) Datagram defaultProtocol
-        bind sock (addrAddress serveraddr)
-        print "UDP server is waiting..."
-        recv sock 4096 >>= \message -> print ("UDP server received: " ++ (show message))
-        print "UDP server socket is closing now."
-        close sock
-    else do
-        addrinfos <- getAddrInfo Nothing (Just "127.0.0.1") (Just "5678")
-        let serveraddr = head addrinfos
-        sock <- socket (addrFamily serveraddr) Datagram defaultProtocol
-        connect sock (addrAddress serveraddr)
-        sendAll sock "Message!"
-        close sock
-     -}
+    putStrLn "Listening to incoming messages..."
+
+    forkIO $ forever $ do
+        recv (appSocket app) 4096 >>= \message -> putStrLn $ "*** " <> show (decode $ BSL.fromStrict message :: Message)
+
+    runApp app $ do
+        sendToNode everyOne $ Ping "Duh" "Message!"
+
+    threadDelay 10000000
 
     putStrLn "Done."
