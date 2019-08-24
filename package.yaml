@@ -24,6 +24,9 @@ dependencies:
 - optparse-applicative
 - network
 - bytestring
+- mtl
+- binary
+- split
 library:
   source-dirs: src
 

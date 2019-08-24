@@ -1,13 +1,20 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Raft
-    (
+    ( Role(..)
+    , Message(..)
+    , NodeState(..)
+    , startState
     ) where
 
+import Data.Binary
+import GHC.Generics
+
 data Role
-    = Leader
+    = Follower
     | Candidate
-    | Follower
+    | Leader
 
 -- start: follower
 -- time out, start election: ? -> candidate
@@ -20,26 +27,27 @@ data Role
 
 -- each node has a "current term" value
 
-type Term = Integer
-
 data Message
     = VoteRequest
-        { nodeId :: Integer
-        , term :: Term
+        { nodeId :: Int
+        , term :: Int
         }
     | Vote
-        { nodeId:: Integer
-        , term :: Term
+        { nodeId :: Int
+        , term :: Int
         , voteGranted :: Bool
         }
+    deriving (Show, Generic)
+
+instance Binary Message
 
 data NodeState = NodeState
-    { currentTerm :: Term
-    , voted :: Bool
-    , role :: Role
+    { nsTerm :: Int
+    , nsVoted :: Bool
+    , nsRole :: Role
     }
 
-start = NodeState 0 True Follower
+startState = NodeState 0 True Follower
 
 timeOutStartElection = undefined
 
