@@ -18,13 +18,14 @@ import           Data.Maybe
 import           Data.String
 import           Log
 import           MlOptions
+import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
+import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
 import           Options.Applicative
 import           Raft
 import           System.Exit
 import           System.IO
 import           System.Random
-import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
-import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
+import           Timer
 
 sendToNode' :: Socket -> Node -> Message -> IO ()
 sendToNode' sock node msg = do
@@ -140,6 +141,17 @@ processOptions Options{..} = do
                 -- TODO: nicer solution instead of explicit recursion
                 _ -> waitForJoin nonce sock
 
+startElectionTimer :: AppT ()
+startElectionTimer = do
+    g <- liftIO $ newStdGen
+    let (delay, _) = randomR (2000000, 4000000) g
+    app <- ask
+    _ <- liftIO $ start delay $ runApp app $ do
+        logDebug "Election timeout!"
+        startElectionTimer
+    return ()
+
+
 main :: IO ()
 main = do
     opts <- execParser options
@@ -147,6 +159,9 @@ main = do
     app <- processOptions opts
 
     runApp app $ do
+        logDebug "Starting election timer..."
+        startElectionTimer
+
         logInfo "Listening to incoming messages..."
 
         liftIO $ forever $ do
