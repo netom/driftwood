@@ -149,7 +149,7 @@ main = do
     runApp app $ do
         logInfo "Listening to incoming messages..."
 
-        liftIO $ forkIO $ forever $ do
+        liftIO $ forever $ do
             recv (appSocket app) 4096 >>= \message -> runApp app $ do
                 logInfo $ show (decode $ BSL.fromStrict message :: Message)
 
