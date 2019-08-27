@@ -53,7 +53,6 @@ everyoneBut = flip $ (/=) . nodeId
 
 processOptions :: Options -> IO App
 processOptions Options{..} = do
-    appNodeState <- newIORef startState
 
     let appLogLevel = optLogLevel
     let appLogTime = optLogTime
@@ -128,6 +127,8 @@ processOptions Options{..} = do
 
     logWith' appLogTime LogInfo appLogLevel $ "SUCCESS. Our node ID is " <> appNodeId
 
+    appNodeState <- newIORef $ startState appNodeId $ map nodeId appNodes
+
     return App{..}
 
     where
@@ -150,7 +151,6 @@ startElectionTimer = do
         logDebug "Election timeout!"
         startElectionTimer
     return ()
-
 
 main :: IO ()
 main = do

@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DeriveGeneric #-}
 
 module Raft
@@ -8,8 +9,10 @@ module Raft
     , startState
     ) where
 
-import Data.Binary
-import GHC.Generics
+import           Data.Binary
+import qualified Data.Map.Strict as M
+import qualified Data.Set as S
+import           GHC.Generics
 
 data Role
     = Follower
@@ -45,21 +48,74 @@ data Message
 
 instance Binary Message
 
+type Votes = M.Map String Bool
+
+blankVotes :: [String] -> Votes
+blankVotes nIds = M.fromList $ map (,False) nIds
+
 data NodeState = NodeState
-    { nsTerm :: Int
-    , nsVoted :: Bool
-    , nsRole :: Role
+    { nsNodeId   :: String
+    , nsRole     :: Role
+    -- TODO: what happens during a term wraparound?
+    , nsTerm     :: Int
+    , nsNodes    :: S.Set String
+    , nsVotedFor :: Maybe String
+    -- Non-empty if there's an election is in progress.
+    -- Either empty or M.size nsVotes == S.size nsNodes
+    , nsVotes    :: Votes
     }
 
-startState = NodeState 0 True Follower
+startState nId nIds = NodeState
+    { nsNodeId   = nId
+    , nsRole     = Follower
+    , nsTerm     = 0
+    , nsNodes    = S.fromList nIds
+    -- Hack: pretend we already gave a vote to ourselves
+    -- (but don't actually give a vote to anyone)
+    -- This prevents voting in the 0th term
+    -- TODO: validate node list so node IDs are unique.
+    , nsVotedFor = Just nId 
+    -- No election is in progress
+    , nsVotes    = M.empty
+    }
 
-timeOutStartElection = undefined
+-- Process a message
+trMsg = undefined
 
-receivedMajority = undefined
+trElectionTimeout NodeState{..} = NodeState
+    { nsRole     = Candidate
+    , nsTerm     = nsTerm + 1
+    , nsVotedFor = Just nsNodeId
+    -- An election MUST be started with the node
+    -- state given as the input to this function.
+    , nsVotes    = M.insert nsNodeId True $ blankVotes $ S.toList nsNodes
+    , ..
+    }
 
-stepDown = undefined
+trHeartbeatTimeout NodeState{..} = 
+    -- No election in progress (received majority in this heartbeat)
+    if M.size nsVotes == 0
+    then NodeState{..}
+    -- This is only possible if we didn't receive the majority during
+    -- this heartbeat. Step down.
+    else trStepDown NodeState{..}
 
-discoverLeaderOrNewTerm t = NodeState t False Follower
+-- This may be called during being a Candidate or a Leader (heartbeat election)
+trReceivedMajority NodeState{..} = NodeState
+    { nsRole     = Leader
+    , nsVotedFor = Nothing
+    , nsVotes    = M.empty
+    , ..
+    }
+
+trStepDown NodeState{..} = NodeState
+    { nsRole     = Follower
+    , nsVotedFor = Nothing
+    , nsVotes    = M.empty
+    , ..
+    }
+
+discoverLeaderOrNewTerm NodeState{..} = NodeState{..}
 
 -- node process:
 -- listen on TChan for Messages
@@ -97,6 +153,3 @@ discoverLeaderOrNewTerm t = NodeState t False Follower
 -- Hooks:
 -- leader
 -- stepDown
-
-someFunc :: IO ()
-someFunc = putStrLn "someFunc"
