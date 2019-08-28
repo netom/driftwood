@@ -1,35 +1,33 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Raft
     ( Role(..)
-    , Message(..)
     , NodeState(..)
-    , startState
+    , Message(..)
+    , Event(..)
+    , HasSendMessage(..)
+    , HasStartElectionTimer(..)
+    , HasStartHeartbeatTimer(..)
+    , processEvent
+    , runNodeProgram
     ) where
 
+import           Control.Monad.State.Strict
 import           Data.Binary
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import           GHC.Generics
 
+-- A node can be any of these:
 data Role
     = Follower
     | Candidate
     | Leader
 
--- start: follower
--- time out, start election: ? -> candidate
--- received majority of votes: candidate -> leader
--- step down: leader -> follower
--- discover current leader or higher term: candidate -> follower
-
--- Time is divided to Terms
--- terms increment eternally
-
--- each node has a "current term" value
-
+-- Message that is communicated between nodes
 data Message
     = VoteRequest
         { msgNodeId :: String
@@ -46,13 +44,24 @@ data Message
         }
     deriving (Show, Generic)
 
+-- An event from the outside:
+-- a message, or timeout
+data Event
+    = EvMessage Message
+    | EvElectionTimeout
+    | EvHeartbeatTimeout
+
+-- You can send these over the network, or store them in files:
 instance Binary Message
 
+-- Keeps track of who voted for us
 type Votes = M.Map String Bool
 
+-- Gives a clean voting sheet
 blankVotes :: [String] -> Votes
 blankVotes nIds = M.fromList $ map (,False) nIds
 
+-- The state of a single node
 data NodeState = NodeState
     { nsNodeId   :: String
     , nsRole     :: Role
@@ -65,91 +74,90 @@ data NodeState = NodeState
     , nsVotes    :: Votes
     }
 
-startState nId nIds = NodeState
-    { nsNodeId   = nId
+class HasSendMessage m where
+    sendMessage :: String -> Message -> m ()
+
+class HasStartElectionTimer m where
+    startElectionTimer :: m ()
+
+class HasStartHeartbeatTimer m where
+    startHeartbeatTimer :: m ()
+
+type NodeT m a = (Monad m) => StateT NodeState m a
+
+startState nodeId peerIds = NodeState
+    { nsNodeId   = nodeId
     , nsRole     = Follower
     , nsTerm     = 0
-    , nsNodes    = S.fromList nIds
+    , nsNodes    = S.fromList (nodeId : peerIds)
     -- Hack: pretend we already gave a vote to ourselves
     -- (but don't actually give a vote to anyone)
     -- This prevents voting in the 0th term
     -- TODO: validate node list so node IDs are unique.
-    , nsVotedFor = Just nId 
+    , nsVotedFor = Just nodeId 
     -- No election is in progress
     , nsVotes    = M.empty
     }
 
 -- Process a message
-trMsg = undefined
+processMessage :: Message -> NodeT m a
+processMessage msg = do
+    undefined
 
-trElectionTimeout NodeState{..} = NodeState
-    { nsRole     = Candidate
-    , nsTerm     = nsTerm + 1
-    , nsVotedFor = Just nsNodeId
-    -- An election MUST be started with the node
-    -- state given as the input to this function.
-    , nsVotes    = M.insert nsNodeId True $ blankVotes $ S.toList nsNodes
-    , ..
-    }
+processEvent :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => Event -> NodeT m ()
+processEvent e = case e of
+    EvMessage msg -> processMessage msg
+    EvElectionTimeout -> aspire
+    EvHeartbeatTimeout -> heartbeatTimeout
 
-trHeartbeatTimeout NodeState{..} = 
+heartbeatTimeout :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => NodeT m ()
+heartbeatTimeout = do
+    vs <- gets nsVotes
+
     -- No election in progress (received majority in this heartbeat)
-    if M.size nsVotes == 0
-    then NodeState{..}
+    if M.size vs == 0
+    then do
+        -- TODO: send messages
+        return ()
+
     -- This is only possible if we didn't receive the majority during
     -- this heartbeat. Step down.
-    else trStepDown NodeState{..}
+    else follow
+
+aspire :: HasSendMessage m => NodeT m ()
+aspire = do
+    modify' $ \NodeState{..} -> NodeState
+        { nsRole     = Candidate
+        , nsTerm     = nsTerm + 1
+        , nsVotedFor = Just nsNodeId
+        -- An election MUST be started with the node
+        -- state given as the input to this function.
+        , nsVotes    = M.insert nsNodeId True $ blankVotes $ S.toList nsNodes
+        , ..
+        }
+    -- TODO: send messages
 
 -- This may be called during being a Candidate or a Leader (heartbeat election)
-trReceivedMajority NodeState{..} = NodeState
-    { nsRole     = Leader
-    , nsVotedFor = Nothing
-    , nsVotes    = M.empty
-    , ..
-    }
+lead :: HasStartHeartbeatTimer m => NodeT m ()
+lead = do
+    modify' $ \NodeState{..} -> NodeState
+        { nsRole     = Leader
+        , nsVotedFor = Nothing
+        , nsVotes    = M.empty
+        , ..
+        }
+    lift startHeartbeatTimer
 
-trStepDown NodeState{..} = NodeState
-    { nsRole     = Follower
-    , nsVotedFor = Nothing
-    , nsVotes    = M.empty
-    , ..
-    }
+-- Convert to follower, start election timer
+follow :: HasStartElectionTimer m => NodeT m ()
+follow = do
+    modify' $ \NodeState{..} -> NodeState
+        { nsRole     = Follower
+        , nsVotedFor = Nothing
+        , nsVotes    = M.empty
+        , ..
+        }
+    lift startElectionTimer
 
-discoverLeaderOrNewTerm NodeState{..} = NodeState{..}
-
--- node process:
--- listen on TChan for Messages
--- start as Follower, term = 0, voted = True
--- if timeout, hold an election ("election process?" Control.Concurrent.Timer?)
--- every received message updates current term (oneShotRestart?)
--- every message updates the current term
--- no vote is given in term 0
-
--- Follower:
--- passive, only listens
-
--- ElectionTimeout: 100-500ms
-
--- Election:
--- increment current term
--- convert from follower to:
-
--- Candidate:
--- vote for self
--- send VoteRequests, retry until
--- * receives majority vote: converts to leader
--- * receives VR from leader: steps down, beacomes follower
--- * no-one wins the election
-
--- Leader:
--- Sends out HeartBeat messages more frequently than the ElectionTimeout
-
--- each node SHOULD only give one vote per term
--- persisting to disk is important for crash recovery in vanilla raft
--- ??? other option: no votes given in 0th term at all ???
---   and requests for proper elections, so terms has a hard real-time limit
--- election timeout must be spread out between [T, 2T] (election timeout)
-
--- Hooks:
--- leader
--- stepDown
+runNodeProgram :: (Monad m, HasStartElectionTimer m) => String -> [String] -> NodeT m a -> m a
+runNodeProgram nodeId peerIds program = fst <$> runStateT (lift startElectionTimer >> program) (startState nodeId peerIds)

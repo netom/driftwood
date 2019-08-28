@@ -13,10 +13,10 @@ import           Data.Binary
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import           Data.IORef
+import           Data.List
 import           Data.List.Split
 import           Data.Maybe
 import           Data.String
-import           Log
 import           MlOptions
 import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
 import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
@@ -27,30 +27,6 @@ import           System.IO
 import           System.Random
 import           Timer
 
-sendToNode' :: Socket -> Node -> Message -> IO ()
-sendToNode' sock node msg = do
-    _ <- sendTo sock (BSL.toStrict $ encode msg) $ nodeAddr node
-    return ()
-
-sendToNode :: (Node -> Bool) -> Message -> AppT ()
-sendToNode pred msg = do
-    -- TODO: a hashmap would prolly be better.
-    -- The first person to run more than 1K nodes please open an issue.
-    ps <- asks appNodes
-    sock <- asks appSocket
-    liftIO $ forM_ ps $ \node -> do
-        when (pred node) $ sendToNode' sock node msg
-
--- sendToNode (withId "blah")
-withId :: String -> Node -> Bool
-withId = flip $ (==) . nodeId
-
-everyone :: Node -> Bool
-everyone = const True
-
-everyoneBut :: String -> Node -> Bool
-everyoneBut = flip $ (/=) . nodeId
-
 processOptions :: Options -> IO App
 processOptions Options{..} = do
 
@@ -58,18 +34,18 @@ processOptions Options{..} = do
     let appLogTime = optLogTime
 
     when (length optPeers < 3) $ do
-        logWith' appLogTime LogError appLogLevel
+        putStrLn
             $  "The number of nodes on the network must be at lest 3. "
             <> "You must use third \"arbiter\" node to elect a leader among two nodes. "
             <> "If you have only a single node, you don't need to elect a leader. "
             <> "If you have no nodes, you have no problems. "
         exitFailure
 
-    appNodes <- forM optPeers $ \pStr -> do
+    nodes <- forM optPeers $ \pStr -> do
         let parts = splitOn ":" pStr
 
         when (length parts /= 2 && length parts /= 3) $ do
-            logWith' appLogTime LogError appLogLevel
+            putStrLn
                 $  "Error parsing node descriptor "
                 <> pStr <> ", use format NODE_ID:HOST:PORT or NODE_ID:HOST."
             exitFailure
@@ -87,7 +63,7 @@ processOptions Options{..} = do
             (Just nodePort)
 
         when (length addrinfos <= 0) $ do
-            logWith' appLogTime LogError appLogLevel
+            putStrLn
                 $  "Could not resolve host in node descriptor "
                 <> pStr <> "."
             exitFailure
@@ -99,7 +75,7 @@ processOptions Options{..} = do
     addrinfos <- getAddrInfo Nothing (Just $ optBindIp) (Just $ optBindPort)
 
     when (length addrinfos <= 0) $ do
-        logWith' appLogTime LogError appLogLevel
+        putStrLn
             $  "Could not bind to " <> optBindIp <> ":"
             <> optBindPort <> ", getaddrinfo returned an empty list."
         exitFailure
@@ -108,26 +84,27 @@ processOptions Options{..} = do
     appSocket <- socket (addrFamily bindAddr) Datagram defaultProtocol
     bind appSocket (addrAddress bindAddr)
 
-    logWith' appLogTime LogInfo appLogLevel "Joining the network..."
+    putStrLn "Joining the network..."
 
     nonce <- randomRIO (0, 2^128) :: IO Integer
 
     eAppIdU <- race
         ( forM_ [0..optDiscoveryRetryCount] $ \_ -> do
-            forM_ appNodes $ \n -> sendToNode' appSocket n $ Join nonce (nodeId n)
+            forM_ nodes $ \node -> sendToNode appSocket node $ Join nonce (nodeId node)
             threadDelay optDiscoveryRetryWait
         )
         $ waitForJoin nonce appSocket
 
-    appNodeId <- case eAppIdU of
+    myId <- case eAppIdU of
         Left () -> do
-            logWith' appLogTime LogError appLogLevel "Could not discover node ID. Am I on the node list?"
+            putStrLn "Could not discover node ID. Am I on the node list?"
             exitFailure
         Right nId -> return nId
 
-    logWith' appLogTime LogInfo appLogLevel $ "SUCCESS. Our node ID is " <> appNodeId
+    let (mes, appPeers) = partition ((== myId) . nodeId) nodes
+    let appMe = head mes
 
-    appNodeState <- newIORef $ startState appNodeId $ map nodeId appNodes
+    putStrLn $ "SUCCESS. Our node ID is " <> nodeId appMe
 
     return App{..}
 
@@ -142,30 +119,16 @@ processOptions Options{..} = do
                 -- TODO: nicer solution instead of explicit recursion
                 _ -> waitForJoin nonce sock
 
-startElectionTimer :: AppT ()
-startElectionTimer = do
-    g <- liftIO $ newStdGen
-    let (delay, _) = randomR (2000000, 4000000) g
-    app <- ask
-    _ <- liftIO $ start delay $ runApp app $ do
-        logDebug "Election timeout!"
-        startElectionTimer
-    return ()
-
 main :: IO ()
 main = do
     opts <- execParser options
 
     app <- processOptions opts
 
-    runApp app $ do
-        logDebug "Starting election timer..."
-        startElectionTimer
+    runApp app $ runNodeProgram (nodeId $ appMe app) (nodeId <$> appPeers app) $ do
+        lift $ logInfo "Listening to incoming messages..."
 
-        logInfo "Listening to incoming messages..."
-
+        sock <- asks appSocket
         liftIO $ forever $ do
-            recv (appSocket app) 4096 >>= \message -> runApp app $ do
+            recv sock 4096 >>= \message -> runApp app $ do
                 logInfo $ show (decode $ BSL.fromStrict message :: Message)
-
-        logInfo "Done."
