@@ -11,8 +11,10 @@ module App
     , logInfo
     , logWarn
     , logError
+    , appLog
     ) where
 
+import           AppOptions
 import           Control.Monad.Reader
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Binary
@@ -21,7 +23,6 @@ import           Data.IORef
 import           Data.Time.Clock
 import           Network.Socket (Socket, SockAddr)
 import           Network.Socket.ByteString (sendTo)
-import           MlOptions
 import           Raft
 import           System.Random
 import           Timer
@@ -43,8 +44,8 @@ data App = App
     , appLogTime   :: Bool
     }
 
-logWith' :: Bool -> LogLevel -> LogLevel -> String -> IO ()
-logWith' logTime myLevel level s = when (myLevel >= level) $ do
+appLog :: Bool -> LogLevel -> LogLevel -> String -> IO ()
+appLog logTime appLevel myLevel s = when (myLevel >= appLevel) $ do
     when logTime $ do
         putStr "["
         getCurrentTime >>= (putStr . show)
@@ -54,9 +55,9 @@ logWith' logTime myLevel level s = when (myLevel >= level) $ do
 
 logWith :: LogLevel -> String -> AppT ()
 logWith myLevel s = do
-    level <- asks appLogLevel
+    appLevel <- asks appLogLevel
     logTime <- asks appLogTime
-    liftIO $ logWith' logTime myLevel level s
+    liftIO $ appLog logTime appLevel myLevel s
         
 logDebug :: String -> AppT ()
 logDebug = logWith LogDebug

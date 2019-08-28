@@ -1,9 +1,9 @@
-module MlOptions
+module AppOptions
     ( Options(..)
     , LogLevel(..)
     , options
     , defaultPort
-    )where
+    ) where
 
 import           Data.List
 import           Data.Maybe
@@ -104,5 +104,5 @@ options = info
                 )
     )) (
         fullDesc
-            <> progDesc "Microscopic leader election tool."
+            <> progDesc "Simple leader election tool based on raft."
     )

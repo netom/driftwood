@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
 import           App
+import           AppOptions
 import           Control.Concurrent
 import           Control.Concurrent.Async
 import           Control.Concurrent.STM.TChan
+import           Control.Exception
 import           Control.Monad
 import           Control.Monad.Reader
 import           Data.Binary
@@ -17,7 +20,6 @@ import           Data.List
 import           Data.List.Split
 import           Data.Maybe
 import           Data.String
-import           MlOptions
 import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
 import           Network.Socket.ByteString (recv, send, sendAll, sendTo)
 import           Options.Applicative
@@ -33,8 +35,14 @@ processOptions Options{..} = do
     let appLogLevel = optLogLevel
     let appLogTime = optLogTime
 
+    let appLog' = appLog appLogTime appLogLevel
+
+    let catchWith msg act = catch act $ \(e :: IOException) -> do
+            appLog' LogError $ msg <> ": " <> show e
+            exitFailure
+
     when (length optPeers < 3) $ do
-        putStrLn
+        appLog' LogError 
             $  "The number of nodes on the network must be at lest 3. "
             <> "You must use third \"arbiter\" node to elect a leader among two nodes. "
             <> "If you have only a single node, you don't need to elect a leader. "
@@ -45,7 +53,7 @@ processOptions Options{..} = do
         let parts = splitOn ":" pStr
 
         when (length parts /= 2 && length parts /= 3) $ do
-            putStrLn
+            appLog' LogError 
                 $  "Error parsing node descriptor "
                 <> pStr <> ", use format NODE_ID:HOST:PORT or NODE_ID:HOST."
             exitFailure
@@ -57,54 +65,71 @@ processOptions Options{..} = do
             then return $ parts !! 2
             else return defaultPort
 
-        addrinfos <- getAddrInfo
-            (Just defaultHints { addrSocketType = Datagram })
-            (Just nodeHost)
-            (Just nodePort)
+        addrinfos <- catchWith ("Could not get node address info for " <> pStr) $
+            getAddrInfo
+                (Just defaultHints { addrSocketType = Datagram })
+                (Just nodeHost)
+                (Just nodePort)
 
         when (length addrinfos <= 0) $ do
-            putStrLn
-                $  "Could not resolve host in node descriptor "
-                <> pStr <> "."
+            appLog' LogError 
+                $  "Could not get node address info for "
+                <> pStr <> ": getaddrinfo retunred an empty list."
             exitFailure
 
         let nodeAddr = addrAddress $head addrinfos
 
         return Node{..}
 
-    addrinfos <- getAddrInfo Nothing (Just $ optBindIp) (Just $ optBindPort)
+    addrinfos <- catchWith
+        (  "Could not get node address info for binding to "
+        <> optBindIp <> ":" <> optBindPort
+        )
+        $ getAddrInfo
+            (Just defaultHints { addrSocketType = Datagram })
+            (Just $ optBindIp)
+            (Just $ optBindPort)
 
     when (length addrinfos <= 0) $ do
-        putStrLn
+        appLog' LogError
             $  "Could not bind to " <> optBindIp <> ":"
             <> optBindPort <> ", getaddrinfo returned an empty list."
         exitFailure
 
     let bindAddr = head addrinfos
-    appSocket <- socket (addrFamily bindAddr) Datagram defaultProtocol
-    bind appSocket (addrAddress bindAddr)
 
-    putStrLn "Joining the network..."
+    appSocket <- catchWith
+        "Could not create socket"
+        $ socket (addrFamily bindAddr) Datagram defaultProtocol
+
+    catchWith
+        ( "Could not bind to IP address " <> optBindIp )
+        $ bind appSocket $ addrAddress bindAddr
+
+    appLog' LogInfo "Joining the network..."
 
     nonce <- randomRIO (0, 2^128) :: IO Integer
 
     eAppIdU <- race
         ( forM_ [0..optDiscoveryRetryCount] $ \_ -> do
-            forM_ nodes $ \node -> sendToNode appSocket node $ Join nonce (nodeId node)
+            forM_ nodes $ \node ->
+                catchWith
+                    ( "Could not send datagram to node " <> nodeId node )
+                    $ sendToNode appSocket node $ Join nonce (nodeId node)
             threadDelay optDiscoveryRetryWait
         )
         $ waitForJoin nonce appSocket
 
     myId <- case eAppIdU of
         Left () -> do
-            putStrLn "Could not discover node ID. Am I on the node list?"
+            appLog' LogError "Could not discover node ID. Am I on the node list?"
             exitFailure
         Right nId -> return nId
 
     let (mes, appPeers) = partition ((== myId) . nodeId) nodes
     let appMe = head mes
 
-    putStrLn $ "SUCCESS. Our node ID is " <> nodeId appMe
+    appLog' LogInfo $ "SUCCESS. Our node ID is " <> nodeId appMe
 
     return App{..}
 
