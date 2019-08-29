@@ -5,6 +5,7 @@ module App
     , ClusterConfig(..)
     , App(..)
     , AppT(..)
+    , HasLogOptions
     , runApp
     , sendToNode
     , logDebug
@@ -53,22 +54,34 @@ appLog logTime appLevel myLevel s = when (myLevel >= appLevel) $ do
     putStr $ (map toUpper $ show myLevel) <> " "
     putStrLn s
 
-logWith :: LogLevel -> String -> AppT ()
+class HasLogOptions env where
+    logLevel :: env -> LogLevel
+    logTime  :: env -> Bool
+
+instance HasLogOptions App where
+    logLevel = appLogLevel
+    logTime  = appLogTime
+
+instance HasLogOptions Options where
+    logLevel = optLogLevel
+    logTime  = optLogTime
+
+logWith :: (MonadReader env m, MonadIO m, HasLogOptions env) => LogLevel -> String -> m ()
 logWith myLevel s = do
-    appLevel <- asks appLogLevel
-    logTime <- asks appLogTime
+    appLevel <- asks logLevel
+    logTime <- asks logTime
     liftIO $ appLog logTime appLevel myLevel s
         
-logDebug :: String -> AppT ()
+logDebug :: (MonadReader env m, MonadIO m, HasLogOptions env) => String -> m ()
 logDebug = logWith LogDebug
 
-logInfo :: String -> AppT ()
+logInfo :: (MonadReader env m, MonadIO m, HasLogOptions env) => String -> m ()
 logInfo = logWith LogInfo
 
-logWarn :: String -> AppT ()
+logWarn :: (MonadReader env m, MonadIO m, HasLogOptions env) => String -> m ()
 logWarn = logWith LogDebug
 
-logError :: String -> AppT ()
+logError :: (MonadReader env m, MonadIO m, HasLogOptions env) => String -> m ()
 logError = logWith LogError
 
 sendToNode :: Socket -> Node -> Message -> IO ()

@@ -29,109 +29,112 @@ import           System.IO
 import           System.Random
 import           Timer
 
-processOptions :: Options -> IO App
-processOptions Options{..} = do
-
-    let appLogLevel = optLogLevel
-    let appLogTime = optLogTime
-
-    let appLog' = appLog appLogTime appLogLevel
-
-    let catchWith msg act = catch act $ \(e :: IOException) -> do
-            appLog' LogError $ msg <> ": " <> show e
-            exitFailure
-
-    when (length optPeers < 3) $ do
-        appLog' LogError 
-            $  "The number of nodes on the network must be at lest 3. "
-            <> "You must use third \"arbiter\" node to elect a leader among two nodes. "
-            <> "If you have only a single node, you don't need to elect a leader. "
-            <> "If you have no nodes, you have no problems. "
+catchWith :: (MonadIO m, MonadReader env m, HasLogOptions env) => String -> IO a -> m a
+catchWith msg act = do
+    env <- ask
+    liftIO $ catch act $ \(e :: IOException) -> do
+        runReaderT (logError $ msg <> ": " <> show e) env
         exitFailure
 
-    nodes <- forM optPeers $ \pStr -> do
-        let parts = splitOn ":" pStr
+processOptions :: Options -> IO App
+processOptions options = do
 
-        when (length parts /= 2 && length parts /= 3) $ do
-            appLog' LogError 
-                $  "Error parsing node descriptor "
-                <> pStr <> ", use format NODE_ID:HOST:PORT or NODE_ID:HOST."
-            exitFailure
+    runWithOptions options $ do
+        appLogLevel <- asks optLogLevel
+        appLogTime  <- asks optLogTime
 
-        let nodeId   = parts !! 0
-        let nodeHost = parts !! 1
+        -- Ok, this is totally unreadable.
+        when . (<3) . length <$> asks optNodes >>= \w -> w $ do
+            logError
+                $  "The number of nodes on the network must be at lest 3. "
+                <> "You must use third \"arbiter\" node to elect a leader among two nodes. "
+                <> "If you have only a single node, you don't need to elect a leader. "
+                <> "If you have no nodes, you have no problems. "
+            liftIO exitFailure
 
-        nodePort <- if length parts == 3
-            then return $ parts !! 2
-            else return defaultPort
+        nodes <- forM (optNodes options) $ \nStr -> do
+            let parts = splitOn ":" nStr
 
-        addrinfos <- catchWith ("Could not get node address info for " <> pStr) $
-            getAddrInfo
+            when (length parts /= 2 && length parts /= 3) $ do
+                logError
+                    $  "Error parsing node descriptor "
+                    <> nStr <> ", use format NODE_ID:HOST:PORT or NODE_ID:HOST."
+                liftIO exitFailure
+
+            let nodeId   = parts !! 0
+            let nodeHost = parts !! 1
+
+            nodePort <- if length parts == 3
+                then return $ parts !! 2
+                else return defaultPort
+
+            addrinfos <- catchWith ("Could not get node address info for " <> nStr) $
+                liftIO $ getAddrInfo
+                    (Just defaultHints { addrSocketType = Datagram })
+                    (Just nodeHost)
+                    (Just nodePort)
+
+            when (length addrinfos <= 0) $ do
+                logError
+                    $  "Could not get node address info for "
+                    <> nStr <> ": getaddrinfo retunred an empty list."
+                liftIO exitFailure
+
+            let nodeAddr = addrAddress $head addrinfos
+
+            return Node{..}
+
+        addrinfos <- catchWith
+            (  "Could not get node address info for binding to "
+            <> optBindIp options <> ":" <> optBindPort options
+            )
+            $ getAddrInfo
                 (Just defaultHints { addrSocketType = Datagram })
-                (Just nodeHost)
-                (Just nodePort)
+                (Just $ optBindIp options)
+                (Just $ optBindPort options)
 
         when (length addrinfos <= 0) $ do
-            appLog' LogError 
-                $  "Could not get node address info for "
-                <> pStr <> ": getaddrinfo retunred an empty list."
-            exitFailure
+            logError
+                $  "Could not bind to " <> optBindIp options <> ":"
+                <> optBindPort options <> ", getaddrinfo returned an empty list."
+            liftIO exitFailure
 
-        let nodeAddr = addrAddress $head addrinfos
+        let bindAddr = head addrinfos
 
-        return Node{..}
+        appSocket <- catchWith
+            "Could not create socket"
+            $ socket (addrFamily bindAddr) Datagram defaultProtocol
 
-    addrinfos <- catchWith
-        (  "Could not get node address info for binding to "
-        <> optBindIp <> ":" <> optBindPort
-        )
-        $ getAddrInfo
-            (Just defaultHints { addrSocketType = Datagram })
-            (Just $ optBindIp)
-            (Just $ optBindPort)
+        catchWith
+            ( "Could not bind to IP address " <> optBindIp options )
+            $ bind appSocket $ addrAddress bindAddr
 
-    when (length addrinfos <= 0) $ do
-        appLog' LogError
-            $  "Could not bind to " <> optBindIp <> ":"
-            <> optBindPort <> ", getaddrinfo returned an empty list."
-        exitFailure
+        logInfo "Joining the network..."
 
-    let bindAddr = head addrinfos
+        nonce <- liftIO $ randomRIO (0 :: Integer, 2^128)
 
-    appSocket <- catchWith
-        "Could not create socket"
-        $ socket (addrFamily bindAddr) Datagram defaultProtocol
+        eAppIdU <- liftIO $ race
+            ( forM_ [0..optDiscoveryRetryCount options] $ \_ -> do
+                forM_ nodes $ \node ->
+                    runWithOptions options $ catchWith
+                        ( "Could not send datagram to node " <> nodeId node )
+                        $ sendToNode appSocket node $ Join nonce (nodeId node)
+                threadDelay $ optDiscoveryRetryWait options
+            )
+            $ waitForJoin nonce appSocket
 
-    catchWith
-        ( "Could not bind to IP address " <> optBindIp )
-        $ bind appSocket $ addrAddress bindAddr
+        myId <- case eAppIdU of
+            Left () -> do
+                logError "Could not discover node ID. Am I on the node list?"
+                liftIO $ exitFailure
+            Right nId -> return nId
 
-    appLog' LogInfo "Joining the network..."
+        let (mes, appPeers) = partition ((== myId) . nodeId) nodes
+        let appMe = head mes
 
-    nonce <- randomRIO (0, 2^128) :: IO Integer
+        logInfo $ "SUCCESS. Our node ID is " <> nodeId appMe
 
-    eAppIdU <- race
-        ( forM_ [0..optDiscoveryRetryCount] $ \_ -> do
-            forM_ nodes $ \node ->
-                catchWith
-                    ( "Could not send datagram to node " <> nodeId node )
-                    $ sendToNode appSocket node $ Join nonce (nodeId node)
-            threadDelay optDiscoveryRetryWait
-        )
-        $ waitForJoin nonce appSocket
-
-    myId <- case eAppIdU of
-        Left () -> do
-            appLog' LogError "Could not discover node ID. Am I on the node list?"
-            exitFailure
-        Right nId -> return nId
-
-    let (mes, appPeers) = partition ((== myId) . nodeId) nodes
-    let appMe = head mes
-
-    appLog' LogInfo $ "SUCCESS. Our node ID is " <> nodeId appMe
-
-    return App{..}
+        return App{..}
 
     where
         waitForJoin :: Integer -> Socket -> IO String

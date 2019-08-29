@@ -3,8 +3,10 @@ module AppOptions
     , LogLevel(..)
     , options
     , defaultPort
+    , runWithOptions
     ) where
 
+import           Control.Monad.Reader
 import           Data.List
 import           Data.Maybe
 import           Options.Applicative
@@ -40,10 +42,13 @@ data Options = Options
     , optDiscoveryRetryCount :: Int
     , optDiscoveryRetryWait :: Int
     , optArbiter  :: Bool
-    , optPeers    :: [String]
+    , optNodes    :: [String]
     , optLogLevel :: LogLevel
     , optLogTime  :: Bool
     } deriving Show
+
+runWithOptions :: Options -> ReaderT Options IO a -> IO a
+runWithOptions = flip runReaderT
 
 defaultPort = "10987"
 
