@@ -16,7 +16,7 @@ module Raft
     ) where
 
 import           Control.Monad.State.Strict
-import           Data.Binary
+import           Data.Binary hiding (get)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import           GHC.Generics
@@ -67,7 +67,7 @@ data NodeState = NodeState
     , nsRole     :: Role
     -- TODO: what happens during a term wraparound?
     , nsTerm     :: Int
-    , nsNodes    :: S.Set String
+    , nsPeers    :: S.Set String
     , nsVotedFor :: Maybe String
     -- Non-empty if there's an election is in progress.
     -- Either empty or M.size nsVotes == S.size nsNodes
@@ -89,11 +89,10 @@ startState nodeId peerIds = NodeState
     { nsNodeId   = nodeId
     , nsRole     = Follower
     , nsTerm     = 0
-    , nsNodes    = S.fromList (nodeId : peerIds)
+    , nsPeers    = S.fromList peerIds
     -- Hack: pretend we already gave a vote to ourselves
     -- (but don't actually give a vote to anyone)
     -- This prevents voting in the 0th term
-    -- TODO: validate node list so node IDs are unique.
     , nsVotedFor = Just nodeId 
     -- No election is in progress
     , nsVotes    = M.empty
@@ -107,8 +106,14 @@ processMessage msg = do
 processEvent :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => Event -> NodeT m ()
 processEvent e = case e of
     EvMessage msg -> processMessage msg
-    EvElectionTimeout -> aspire
+    EvElectionTimeout -> stepForward
     EvHeartbeatTimeout -> heartbeatTimeout
+
+sendVoteRequests :: HasSendMessage m => NodeT m ()
+sendVoteRequests = do
+    ns <- get
+    forM_ (nsPeers ns) $ \node -> do
+        lift $ sendMessage node $ VoteRequest (nsNodeId ns) (nsTerm ns)
 
 heartbeatTimeout :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => NodeT m ()
 heartbeatTimeout = do
@@ -116,26 +121,24 @@ heartbeatTimeout = do
 
     -- No election in progress (received majority in this heartbeat)
     if M.size vs == 0
-    then do
-        -- TODO: send messages
-        return ()
+    then sendVoteRequests
 
     -- This is only possible if we didn't receive the majority during
     -- this heartbeat. Step down.
     else follow
 
-aspire :: HasSendMessage m => NodeT m ()
-aspire = do
+stepForward :: HasSendMessage m => NodeT m ()
+stepForward = do
     modify' $ \NodeState{..} -> NodeState
         { nsRole     = Candidate
         , nsTerm     = nsTerm + 1
         , nsVotedFor = Just nsNodeId
         -- An election MUST be started with the node
         -- state given as the input to this function.
-        , nsVotes    = M.insert nsNodeId True $ blankVotes $ S.toList nsNodes
+        , nsVotes    = M.insert nsNodeId True $ blankVotes $ S.toList nsPeers
         , ..
         }
-    -- TODO: send messages
+    sendVoteRequests
 
 -- This may be called during being a Candidate or a Leader (heartbeat election)
 lead :: HasStartHeartbeatTimer m => NodeT m ()

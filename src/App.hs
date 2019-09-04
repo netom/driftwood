@@ -71,7 +71,7 @@ logWith myLevel s = do
     appLevel <- asks logLevel
     logTime <- asks logTime
     liftIO $ appLog logTime appLevel myLevel s
-        
+
 logDebug :: (MonadReader env m, MonadIO m, HasLogOptions env) => String -> m ()
 logDebug = logWith LogDebug
 
@@ -105,7 +105,7 @@ instance HasStartElectionTimer AppT where
         app <- ask
         _ <- liftIO $ start delay $ runApp app $ do
             logDebug "Election timeout!"
-            startElectionTimer
+            -- TODO: send an election timeout message to the Raft module
         return ()
 
 instance HasStartHeartbeatTimer AppT where
@@ -115,7 +115,7 @@ instance HasStartHeartbeatTimer AppT where
         app <- ask
         _ <- liftIO $ start delay $ runApp app $ do
             logDebug "Heartbeat timeout!"
-            startElectionTimer
+            -- TODO: send a heartbeat timeout message to the Raft module
         return ()
 
 runApp :: App -> AppT () -> IO ()

@@ -43,11 +43,13 @@ processOptions options = do
         appLogLevel <- asks optLogLevel
         appLogTime  <- asks optLogTime
 
+        -- TODO: check that every node is unique
+
         -- Ok, this is totally unreadable.
         when . (<3) . length <$> asks optNodes >>= \w -> w $ do
             logError
                 $  "The number of nodes on the network must be at lest 3. "
-                <> "You must use third \"arbiter\" node to elect a leader among two nodes. "
+                <> "You must use a third \"arbiter\" node to elect a leader among two nodes. "
                 <> "If you have only a single node, you don't need to elect a leader. "
                 <> "If you have no nodes, you have no problems. "
             liftIO exitFailure
