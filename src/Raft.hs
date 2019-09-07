@@ -99,9 +99,25 @@ startState nodeId peerIds = NodeState
     }
 
 -- Process a message
-processMessage :: Message -> NodeT m a
+processMessage :: Message -> NodeT m ()
 processMessage msg = do
-    undefined
+    role <- gets nsRole
+    case role of
+        Follower -> case msg of
+            VoteRequest{} -> do
+                -- Check term > our term, increase term
+                -- Check other node id =? nodeid vote given to, or no vote given
+                -- Record vote given
+                -- Send vote message
+                return ()
+            _ -> return ()
+        Candidate -> case msg of
+            Vote{} -> return ()
+            _ -> return ()
+        Leader -> case msg of
+            Vote{} -> return ()
+            VoteRequest{} -> return ()
+            _ -> return ()
 
 processEvent :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => Event -> NodeT m ()
 processEvent e = case e of
