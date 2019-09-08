@@ -2,6 +2,7 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Raft
     ( Role(..)
@@ -15,9 +16,12 @@ module Raft
     , runNodeProgram
     ) where
 
+import           Control.Lens
 import           Control.Monad.State.Strict
+import           Control.Monad.Trans.Maybe
 import           Data.Binary hiding (get)
 import qualified Data.Map.Strict as M
+import           Data.Maybe
 import qualified Data.Set as S
 import           GHC.Generics
 
@@ -63,16 +67,18 @@ blankVotes nIds = M.fromList $ map (,False) nIds
 
 -- The state of a single node
 data NodeState = NodeState
-    { nsNodeId   :: String
-    , nsRole     :: Role
+    { _nsNodeId   :: String
+    , _nsRole     :: Role
     -- TODO: what happens during a term wraparound?
-    , nsTerm     :: Int
-    , nsPeers    :: S.Set String
-    , nsVotedFor :: Maybe String
-    -- Non-empty if there's an election is in progress.
-    -- Either empty or M.size nsVotes == S.size nsNodes
-    , nsVotes    :: Votes
+    , _nsTerm     :: Int
+    , _nsPeers    :: S.Set String
+    , _nsVotedFor :: Maybe String
+    -- Non-empty if there's an election in progress.
+    -- Either empty or M.size nsVotes == S.size nsPeers
+    , _nsVotes    :: Votes
     }
+
+makeLenses ''NodeState
 
 class HasSendMessage m where
     sendMessage :: String -> Message -> m ()
@@ -86,30 +92,33 @@ class HasStartHeartbeatTimer m where
 type NodeT m a = (Monad m) => StateT NodeState m a
 
 startState nodeId peerIds = NodeState
-    { nsNodeId   = nodeId
-    , nsRole     = Follower
-    , nsTerm     = 0
-    , nsPeers    = S.fromList peerIds
+    { _nsNodeId   = nodeId
+    , _nsRole     = Follower
+    , _nsTerm     = 0
+    , _nsPeers    = S.fromList peerIds
     -- Hack: pretend we already gave a vote to ourselves
     -- (but don't actually give a vote to anyone)
     -- This prevents voting in the 0th term
-    , nsVotedFor = Just nodeId 
+    , _nsVotedFor = Just nodeId 
     -- No election is in progress
-    , nsVotes    = M.empty
+    , _nsVotes    = M.empty
     }
 
 -- Process a message
-processMessage :: Message -> NodeT m ()
+processMessage :: HasSendMessage m => Message -> NodeT m ()
 processMessage msg = do
-    role <- gets nsRole
-    case role of
+    ns <- get
+    case ns ^. nsRole of
         Follower -> case msg of
-            VoteRequest{} -> do
-                -- Check term > our term, increase term
-                -- Check other node id =? nodeid vote given to, or no vote given
-                -- Record vote given
-                -- Send vote message
-                return ()
+            VoteRequest{..} -> do
+                when (msgTerm >= ns ^. nsTerm) $ do
+                    modify' (nsTerm .~ msgTerm)
+                    if (isNothing (ns ^. nsVotedFor) || (ns ^. nsVotedFor) == Just msgNodeId)
+                    then do
+                        modify' (nsVotedFor .~ Just msgNodeId)
+                        lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm True
+                    else
+                        lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm False
             _ -> return ()
         Candidate -> case msg of
             Vote{} -> return ()
@@ -128,15 +137,15 @@ processEvent e = case e of
 sendVoteRequests :: HasSendMessage m => NodeT m ()
 sendVoteRequests = do
     ns <- get
-    forM_ (nsPeers ns) $ \node -> do
-        lift $ sendMessage node $ VoteRequest (nsNodeId ns) (nsTerm ns)
+    forM_ (ns ^. nsPeers) $ \node -> do
+        lift $ sendMessage node $ VoteRequest (ns ^. nsNodeId) (ns ^. nsTerm)
 
 heartbeatTimeout :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => NodeT m ()
 heartbeatTimeout = do
-    vs <- gets nsVotes
+    ns <- get
 
     -- No election in progress (received majority in this heartbeat)
-    if M.size vs == 0
+    if M.size (ns ^. nsVotes) == 0
     then sendVoteRequests
 
     -- This is only possible if we didn't receive the majority during
@@ -145,37 +154,35 @@ heartbeatTimeout = do
 
 stepForward :: HasSendMessage m => NodeT m ()
 stepForward = do
-    modify' $ \NodeState{..} -> NodeState
-        { nsRole     = Candidate
-        , nsTerm     = nsTerm + 1
-        , nsVotedFor = Just nsNodeId
+    nsRole <.= Candidate
+    
+    modify' (\ns -> ns
+        & nsRole .~ Candidate
+        & nsTerm +~ 1
+        & nsVotedFor .~ (Just $ ns ^. nsNodeId)
         -- An election MUST be started with the node
         -- state given as the input to this function.
-        , nsVotes    = M.insert nsNodeId True $ blankVotes $ S.toList nsPeers
-        , ..
-        }
+        & nsVotes .~ (M.insert (ns ^. nsNodeId) True $ blankVotes $ S.toList (ns ^. nsPeers))
+        )
+
     sendVoteRequests
 
 -- This may be called during being a Candidate or a Leader (heartbeat election)
 lead :: HasStartHeartbeatTimer m => NodeT m ()
 lead = do
-    modify' $ \NodeState{..} -> NodeState
-        { nsRole     = Leader
-        , nsVotedFor = Nothing
-        , nsVotes    = M.empty
-        , ..
-        }
+    nsRole     <.= Leader
+    nsVotedFor <.= Nothing
+    nsVotes    <.= M.empty
+
     lift startHeartbeatTimer
 
 -- Convert to follower, start election timer
 follow :: HasStartElectionTimer m => NodeT m ()
 follow = do
-    modify' $ \NodeState{..} -> NodeState
-        { nsRole     = Follower
-        , nsVotedFor = Nothing
-        , nsVotes    = M.empty
-        , ..
-        }
+    nsRole     <.= Follower
+    nsVotedFor <.= Nothing
+    nsVotes    <.= M.empty
+
     lift startElectionTimer
 
 runNodeProgram :: (Monad m, HasStartElectionTimer m) => String -> [String] -> NodeT m a -> m a

@@ -21,6 +21,7 @@ dependencies:
 - binary
 - bytestring
 - containers
+- lens
 - mtl
 - network
 - optparse-applicative
@@ -28,6 +29,7 @@ dependencies:
 - split
 - stm
 - time
+- transformers
 library:
   source-dirs: src
 
