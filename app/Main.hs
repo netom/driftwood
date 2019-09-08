@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main where
 
@@ -18,6 +19,7 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.IORef
 import           Data.List
 import           Data.List.Split
+import qualified Data.Map as M
 import           Data.Maybe
 import           Data.String
 import           Network.Socket hiding     (recv, send, defaultPort, sendTo)
@@ -36,6 +38,26 @@ catchWith msg act = do
         runReaderT (logError $ msg <> ": " <> show e) env
         exitFailure
 
+-- It's like "when", but inside a MonadReader
+-- with a predicate working on a part of the environment
+whenR :: MonadReader env m => (env -> a) -> (a -> Bool) -> m () -> m ()
+whenR getter pred action = do
+    a <- asks getter
+    when (pred a) action
+
+repeatedElements :: forall a. Ord a => [a] -> [a]
+repeatedElements as =
+    M.keys . M.filter (>1) $ foldl' foldf M.empty as
+
+    where
+        foldf :: M.Map a Int -> a -> M.Map a Int
+        foldf m v = M.alter alterf v m
+
+        alterf :: Maybe Int -> Maybe Int
+        alterf = \case
+            Nothing -> Just 1
+            Just i  -> Just $ i + 1
+
 processOptions :: Options -> IO App
 processOptions options = do
 
@@ -43,10 +65,14 @@ processOptions options = do
         appLogLevel <- asks optLogLevel
         appLogTime  <- asks optLogTime
 
-        -- TODO: check that every node is unique
+        repeatedNodes <- repeatedElements <$> (fmap $ takeWhile (/=':')) <$> asks optNodes
+        when (length repeatedNodes > 0) $ do
+            logError
+                $  "The following nodes IDs are non-unique: "
+                <> intercalate ", " repeatedNodes
+            liftIO exitFailure
 
-        -- Ok, this is totally unreadable.
-        when . (<3) . length <$> asks optNodes >>= \w -> w $ do
+        whenR (length . optNodes) (< 3) $ do
             logError
                 $  "The number of nodes on the network must be at lest 3. "
                 <> "You must use a third \"arbiter\" node to elect a leader among two nodes. "
