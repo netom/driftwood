@@ -30,12 +30,14 @@ data Role
     = Follower
     | Candidate
     | Leader
+    deriving Eq
 
 -- Message that is communicated between nodes
 data Message
     = VoteRequest
         { msgNodeId :: String
         , msgTerm   :: Int
+        , msgLeader :: Bool
         }
     | Vote
         { msgNodeId  :: String
@@ -43,8 +45,8 @@ data Message
         , msgGranted :: Bool
         }
     | Join
-        { msgNonce :: Integer
-        , msgNodeId  :: String
+        { msgNodeId :: String
+        , msgNonce  :: Integer
         }
     deriving (Show, Generic)
 
@@ -111,23 +113,23 @@ processMessage msg = do
     case ns ^. nsRole of
         Follower -> case msg of
             VoteRequest{..} -> do
-                when (msgTerm >= ns ^. nsTerm) $ do
-                    modify' (nsTerm .~ msgTerm)
-                    if (isNothing (ns ^. nsVotedFor) || (ns ^. nsVotedFor) == Just msgNodeId)
-                    then do
-                        modify' (nsVotedFor .~ Just msgNodeId)
-                        lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm True
-                    else
-                        lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm False
+                when (msgTerm > ns ^. nsTerm) $ do
+                    nsTerm <.= msgTerm
+                    nsVotedFor <.= Just msgNodeId
+                    lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm True
+                when (msgTerm == ns ^. nsTerm) $ do
+                    if isNothing (ns ^. nsVotedFor) || (ns ^. nsVotedFor) == Just msgNodeId
+                    then lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm True
+                    else lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm False
             _ -> return ()
         Candidate -> case msg of
             Vote{} -> return ()
             _ -> return ()
         Leader -> case msg of
             Vote{} -> return ()
-            VoteRequest{} -> return ()
             _ -> return ()
 
+-- Process an event
 processEvent :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => Event -> NodeT m ()
 processEvent e = case e of
     EvMessage msg -> processMessage msg
@@ -138,8 +140,12 @@ sendVoteRequests :: HasSendMessage m => NodeT m ()
 sendVoteRequests = do
     ns <- get
     forM_ (ns ^. nsPeers) $ \node -> do
-        lift $ sendMessage node $ VoteRequest (ns ^. nsNodeId) (ns ^. nsTerm)
+        lift $ sendMessage node $ VoteRequest (ns ^. nsNodeId) (ns ^. nsTerm) (ns ^. nsRole == Leader)
 
+-- Called when the heartbear timeout expires.
+-- If the node got the majority in the previous heartbeat,
+-- then send new vote requests
+-- If the node did not get the majority, step down
 heartbeatTimeout :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => NodeT m ()
 heartbeatTimeout = do
     ns <- get
@@ -152,16 +158,14 @@ heartbeatTimeout = do
     -- this heartbeat. Step down.
     else follow
 
+-- Become a Candidate, increase Term, and start a new election
 stepForward :: HasSendMessage m => NodeT m ()
 stepForward = do
-    nsRole <.= Candidate
-    
-    modify' (\ns -> ns
+    modify' 
+        ( \ns -> ns
         & nsRole .~ Candidate
         & nsTerm +~ 1
         & nsVotedFor .~ (Just $ ns ^. nsNodeId)
-        -- An election MUST be started with the node
-        -- state given as the input to this function.
         & nsVotes .~ (M.insert (ns ^. nsNodeId) True $ blankVotes $ S.toList (ns ^. nsPeers))
         )
 

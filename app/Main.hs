@@ -146,7 +146,7 @@ processOptions options = do
                 forM_ nodes $ \node ->
                     runWithOptions options $ catchWith
                         ( "Could not send datagram to node " <> nodeId node )
-                        $ sendToNode appSocket node $ Join nonce (nodeId node)
+                        $ sendToNode appSocket node $ Join (nodeId node) nonce
                 threadDelay $ optDiscoveryRetryWait options
             )
             $ waitForJoin nonce appSocket
@@ -171,7 +171,7 @@ processOptions options = do
             let msg = decode $ BSL.fromStrict msgBS
             -- TODO: what if decode fails?
             case msg of
-                Join nonce nId -> return nId
+                Join nId nonce -> return nId
                 -- TODO: nicer solution instead of explicit recursion
                 _ -> waitForJoin nonce sock
 
