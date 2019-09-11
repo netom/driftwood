@@ -9,9 +9,7 @@ module Raft
     , NodeState(..)
     , Message(..)
     , Event(..)
-    , HasSendMessage(..)
-    , HasStartElectionTimer(..)
-    , HasStartHeartbeatTimer(..)
+    , MonadRaft(..)
     , processEvent
     , runNodeProgram
     ) where
@@ -37,12 +35,15 @@ data Message
     = VoteRequest
         { msgNodeId :: String
         , msgTerm   :: Int
-        , msgLeader :: Bool
         }
     | Vote
         { msgNodeId  :: String
         , msgTerm    :: Int
         , msgGranted :: Bool
+        }
+    | Heartbeat
+        { msgNodeId :: String
+        , msgTerm   :: Int
         }
     | Join
         { msgNodeId :: String
@@ -76,20 +77,19 @@ data NodeState = NodeState
     , _nsPeers    :: S.Set String
     , _nsVotedFor :: Maybe String
     -- Non-empty if there's an election in progress.
-    -- Either empty or M.size nsVotes == S.size nsPeers
+    -- Either empty or M.size nsVotes <= S.size nsPeers
     , _nsVotes    :: Votes
     }
 
 makeLenses ''NodeState
 
-class HasSendMessage m where
+class MonadRaft m where
     sendMessage :: String -> Message -> m ()
-
-class HasStartElectionTimer m where
     startElectionTimer :: m ()
-
-class HasStartHeartbeatTimer m where
+    resetElectionTimer :: m()
+    stopElectionTimer :: m()
     startHeartbeatTimer :: m ()
+    stopHeartbeatTimer :: m ()
 
 type NodeT m a = (Monad m) => StateT NodeState m a
 
@@ -106,51 +106,98 @@ startState nodeId peerIds = NodeState
     , _nsVotes    = M.empty
     }
 
+-- It's like "when", but inside a MonadState
+-- with a predicate working on a part of the environment
+whenS :: MonadState s m => (s -> a) -> (a -> Bool) -> m () -> m ()
+whenS getter pred action = do
+    a <- gets getter
+    when (pred a) action
+
 -- Process a message
-processMessage :: HasSendMessage m => Message -> NodeT m ()
+processMessage :: MonadRaft m => Message -> NodeT m ()
 processMessage msg = do
-    ns <- get
-    case ns ^. nsRole of
+    NodeState{..} <- get
+    case _nsRole of
         Follower -> case msg of
+            -- Respond to RPCs from candidates and leaders
+            -- If election timeout elapses [without VR or HB], convert to candidate
             VoteRequest{..} -> do
-                when (msgTerm > ns ^. nsTerm) $ do
-                    nsTerm <.= msgTerm
-                    nsVotedFor <.= Just msgNodeId
-                    lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm True
-                when (msgTerm == ns ^. nsTerm) $ do
-                    if isNothing (ns ^. nsVotedFor) || (ns ^. nsVotedFor) == Just msgNodeId
-                    then lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm True
-                    else lift $ sendMessage msgNodeId $ Vote (ns ^. nsNodeId) msgTerm False
+                when (_nsTerm < msgTerm) $ do
+                    nsTerm .= msgTerm
+                    nsVotedFor .= Just msgNodeId
+                    lift $ sendMessage msgNodeId $ Vote _nsNodeId msgTerm True
+                when (_nsTerm == msgTerm) $ do
+                    if isNothing _nsVotedFor || _nsVotedFor == Just msgNodeId
+                    then lift $ sendMessage msgNodeId $ Vote _nsNodeId msgTerm True
+                    else lift $ sendMessage msgNodeId $ Vote _nsNodeId msgTerm False
+                when (_nsTerm > msgTerm) $ do
+                    lift $ sendMessage msgNodeId $ Vote _nsNodeId msgTerm False
+                lift resetElectionTimer
+            Heartbeat{..} -> do
+                when (msgTerm > _nsTerm) $ do
+                    nsTerm .= msgTerm
+                lift resetElectionTimer
             _ -> return ()
         Candidate -> case msg of
-            Vote{} -> return ()
+            -- On conversion to candidate, start election:
+            --   - Increment currentTerm
+            --   - Vote for self
+            --   - Reset election timer
+            --   - Send RequestVote RPCs to all other servers
+            -- If votes received from majority of servers: become leader
+            -- If [Heartbeat] RPC received from new leader: convert to follower
+            -- If election timeout elapses: start new election       
+            -- If packet received with greater Term: convert to follower 
+            VoteRequest{..} -> do
+                lift $ sendMessage msgNodeId $ Vote _nsNodeId msgTerm False
+            Vote{} -> do
+                -- TODO: record vote
+                -- if got majority, go ahead and covert to leader
+                return ()
+            Heartbeat{..} -> do
+                when (msgTerm >= _nsTerm) $ do
+                    nsTerm .= msgTerm
+                    follow
             _ -> return ()
         Leader -> case msg of
-            Vote{} -> return ()
+            -- Send periodic HeartBeat RPCs
+            -- If packet received with greater Term: convert to follower
+            VoteRequest{..} -> do
+                when (msgTerm > _nsTerm) $ do
+                    nsTerm .= msgTerm
+                    follow
+                    nsVotedFor .= Just msgNodeId
+                    lift $ sendMessage msgNodeId $ Vote _nsNodeId msgTerm True
+                    lift $ resetElectionTimer
+            Heartbeat{..} -> do
+                when (msgTerm > _nsTerm) $ do
+                    nsTerm .= msgTerm
+                    follow
             _ -> return ()
 
 -- Process an event
-processEvent :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => Event -> NodeT m ()
+processEvent :: MonadRaft m => Event -> NodeT m ()
 processEvent e = case e of
     EvMessage msg -> processMessage msg
     EvElectionTimeout -> stepForward
     EvHeartbeatTimeout -> heartbeatTimeout
 
-sendVoteRequests :: HasSendMessage m => NodeT m ()
+sendVoteRequests :: MonadRaft m => NodeT m ()
 sendVoteRequests = do
     ns <- get
     forM_ (ns ^. nsPeers) $ \node -> do
-        lift $ sendMessage node $ VoteRequest (ns ^. nsNodeId) (ns ^. nsTerm) (ns ^. nsRole == Leader)
+        lift $ sendMessage node $ VoteRequest (ns ^. nsNodeId) (ns ^. nsTerm)
 
 -- Called when the heartbear timeout expires.
 -- If the node got the majority in the previous heartbeat,
 -- then send new vote requests
 -- If the node did not get the majority, step down
-heartbeatTimeout :: (HasSendMessage m, HasStartHeartbeatTimer m, HasStartElectionTimer m) => NodeT m ()
+heartbeatTimeout :: MonadRaft m => NodeT m ()
 heartbeatTimeout = do
     ns <- get
 
     -- No election in progress (received majority in this heartbeat)
+    -- TODO: count majority properly
     if M.size (ns ^. nsVotes) == 0
     then sendVoteRequests
 
@@ -159,7 +206,7 @@ heartbeatTimeout = do
     else follow
 
 -- Become a Candidate, increase Term, and start a new election
-stepForward :: HasSendMessage m => NodeT m ()
+stepForward :: MonadRaft m => NodeT m ()
 stepForward = do
     modify' 
         ( \ns -> ns
@@ -172,22 +219,24 @@ stepForward = do
     sendVoteRequests
 
 -- This may be called during being a Candidate or a Leader (heartbeat election)
-lead :: HasStartHeartbeatTimer m => NodeT m ()
+lead :: MonadRaft m => NodeT m ()
 lead = do
     nsRole     <.= Leader
     nsVotedFor <.= Nothing
     nsVotes    <.= M.empty
 
+    lift stopElectionTimer
     lift startHeartbeatTimer
 
 -- Convert to follower, start election timer
-follow :: HasStartElectionTimer m => NodeT m ()
+follow :: MonadRaft m => NodeT m ()
 follow = do
     nsRole     <.= Follower
     nsVotedFor <.= Nothing
     nsVotes    <.= M.empty
 
+    lift stopHeartbeatTimer
     lift startElectionTimer
 
-runNodeProgram :: (Monad m, HasStartElectionTimer m) => String -> [String] -> NodeT m a -> m a
+runNodeProgram :: (Monad m, MonadRaft m) => String -> [String] -> NodeT m a -> m a
 runNodeProgram nodeId peerIds program = fst <$> runStateT (lift startElectionTimer >> program) (startState nodeId peerIds)
