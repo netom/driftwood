@@ -16,6 +16,7 @@ module App
     ) where
 
 import           AppOptions
+import           Control.Concurrent.STM.TChan
 import           Control.Monad.Reader
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Binary
@@ -38,11 +39,14 @@ data Node = Node
 newtype ClusterConfig = ClusterConfig { ccPeers :: [Node] }
 
 data App = App
-    { appMe        :: Node
-    , appPeers     :: [Node]
-    , appSocket    :: Socket
-    , appLogLevel  :: LogLevel
-    , appLogTime   :: Bool
+    { appMe       :: Node
+    , appPeers    :: [Node]
+    , appSocket   :: Socket
+    , appLogLevel :: LogLevel
+    , appLogTime  :: Bool
+    , appChan     :: TChan Event
+    , appElectionTimer  :: Timer
+    , appHeartbeatTimer :: Timer
     }
 
 appLog :: Bool -> LogLevel -> LogLevel -> String -> IO ()
@@ -91,32 +95,35 @@ sendToNode sock node msg = do
 
 newtype AppT a = AppT { runAppT :: ReaderT App IO a } deriving (Functor, Applicative, Monad, MonadIO, MonadReader App)
 
-instance HasSendMessage AppT where
+instance MonadRaft AppT where
+
     sendMessage node msg = do
         ps <- asks appPeers
         sock <- asks appSocket
         liftIO $ forM_ ps $ \peer -> do
             when (nodeId peer == node) $ sendToNode sock peer msg
 
-instance HasStartElectionTimer AppT where
     startElectionTimer = do
         g <- liftIO $ newStdGen
         let (delay, _) = randomR (2000000, 4000000) g
         app <- ask
-        _ <- liftIO $ start delay $ runApp app $ do
-            logDebug "Election timeout!"
-            -- TODO: send an election timeout message to the Raft module
+        liftIO $ start (appElectionTimer app) delay
+
+    stopElectionTimer = do
         return ()
 
-instance HasStartHeartbeatTimer AppT where
+    resetElectionTimer = do
+        return ()
+
     startHeartbeatTimer = do
         g <- liftIO $ newStdGen
         let (delay, _) = randomR (500000, 1000000) g
         app <- ask
-        _ <- liftIO $ start delay $ runApp app $ do
-            logDebug "Heartbeat timeout!"
-            -- TODO: send a heartbeat timeout message to the Raft module
+        liftIO $ start (appHeartbeatTimer app) delay
+
+    stopHeartbeatTimer = do
         return ()
+
 
 runApp :: App -> AppT () -> IO ()
 runApp a m = runReaderT (runAppT m) a

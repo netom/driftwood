@@ -9,6 +9,7 @@ import           App
 import           AppOptions
 import           Control.Concurrent
 import           Control.Concurrent.Async
+import           Control.Concurrent.STM
 import           Control.Concurrent.STM.TChan
 import           Control.Exception
 import           Control.Monad
@@ -162,6 +163,8 @@ processOptions options = do
 
         logInfo $ "SUCCESS. Our node ID is " <> nodeId appMe
 
+        appChan <- liftIO newTChanIO
+
         return App{..}
 
     where
@@ -187,4 +190,7 @@ main = do
         sock <- asks appSocket
         liftIO $ forever $ do
             recv sock 4096 >>= \message -> runApp app $ do
-                logInfo $ show (decode $ BSL.fromStrict message :: Message)
+                let msg = decode $ BSL.fromStrict message
+                logInfo $ show msg
+                ch <- asks appChan
+                liftIO $ atomically $ writeTChan ch $ EvMessage msg
