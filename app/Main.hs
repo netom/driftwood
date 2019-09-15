@@ -165,6 +165,9 @@ processOptions options = do
 
         appChan <- liftIO newTChanIO
 
+        appElectionTimer <- liftIO $ new (500000, 1000000) undefined -- TODO: send event to TCHan
+        appHeartbeatTimer <- liftIO $ new (500000, 1000000) undefined -- TODO: send event to TCHan
+
         return App{..}
 
     where

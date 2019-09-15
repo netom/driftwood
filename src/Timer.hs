@@ -1,31 +1,36 @@
 module Timer
     ( Timer
+    , new
     , start
     , stop
-    , reset
+    , restart
     ) where
 
 import           Control.Concurrent
 import           Data.IORef
+import           System.Random
 
 data Timer = Timer
     { tmTId    :: IORef (Maybe ThreadId)
-    , tmDelay  :: Int
+    , tmDelay  :: (Int, Int)
     , tmAction :: IO ()
     }
 
-new :: Int -> IO () -> IO Timer
-new delay action = do
+new :: (Int, Int) -> IO () -> IO Timer
+new delayRange action = do
     ref <- newIORef Nothing
-    return $ Timer ref delay action
+    return $ Timer ref delayRange action
 
-start :: Timer -> Int -> IO ()
-start t i = do
+start :: Timer -> IO ()
+start t = do
     mbTId <- readIORef $ tmTId t
     case mbTId of
         Just _ -> return ()
         _ -> do
-            tId <- forkIO $ threadDelay (tmDelay t) >> tmAction t
+            g <- newStdGen
+            let (d1, d2) = tmDelay t
+            let (delay, _) = randomR (d1, d2) g
+            tId <- forkIO $ threadDelay delay >> tmAction t
             ref <- writeIORef (tmTId t) $ Just tId
             writeIORef (tmTId t) Nothing
 
@@ -38,12 +43,7 @@ stop t = do
             writeIORef (tmTId t) Nothing
         _ -> return ()
 
-reset :: Timer -> IO ()
-reset t = do
-    mbTId <- readIORef $ tmTId t
-    case mbTId of
-        Just tId -> do
-            killThread tId
-            tId' <- forkIO $ threadDelay (tmDelay t) >> tmAction t
-            atomicModifyIORef' (tmTId t) (\_ -> (Just tId',()))
-        _ -> return ()
+restart :: Timer -> IO ()
+restart t = do
+    stop t
+    start t

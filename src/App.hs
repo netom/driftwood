@@ -104,25 +104,24 @@ instance MonadRaft AppT where
             when (nodeId peer == node) $ sendToNode sock peer msg
 
     startElectionTimer = do
-        g <- liftIO $ newStdGen
-        let (delay, _) = randomR (2000000, 4000000) g
         app <- ask
-        liftIO $ start (appElectionTimer app) delay
+        liftIO $ start (appElectionTimer app)
 
     stopElectionTimer = do
-        return ()
+        app <- ask
+        liftIO $ stop (appElectionTimer app)
 
     resetElectionTimer = do
-        return ()
+        app <- ask
+        liftIO $ restart (appElectionTimer app)
 
     startHeartbeatTimer = do
-        g <- liftIO $ newStdGen
-        let (delay, _) = randomR (500000, 1000000) g
         app <- ask
-        liftIO $ start (appHeartbeatTimer app) delay
+        liftIO $ start (appHeartbeatTimer app)
 
     stopHeartbeatTimer = do
-        return ()
+        app <- ask
+        liftIO $ stop (appHeartbeatTimer app)
 
 
 runApp :: App -> AppT () -> IO ()
