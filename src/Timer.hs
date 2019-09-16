@@ -31,8 +31,7 @@ start t = do
             let (d1, d2) = tmDelay t
             let (delay, _) = randomR (d1, d2) g
             tId <- forkIO $ threadDelay delay >> tmAction t
-            ref <- writeIORef (tmTId t) $ Just tId
-            writeIORef (tmTId t) Nothing
+            writeIORef (tmTId t) $ Just tId
 
 stop :: Timer -> IO ()
 stop t = do
