@@ -57,6 +57,7 @@ data Event
     = EvMessage Message
     | EvElectionTimeout
     | EvHeartbeatTimeout
+    deriving Show
 
 -- You can send these over the network, or store them in files:
 instance Binary Message
@@ -178,10 +179,16 @@ processMessage msg = do
 processEvent :: MonadRaft m => Event -> NodeT m ()
 processEvent e = case e of
     EvMessage msg -> processMessage msg
-    EvElectionTimeout -> stepForward
-    EvHeartbeatTimeout -> sendHeartbeats
+    EvElectionTimeout -> do
+        stepForward
+        sendVoteRequests
+        lift startElectionTimer
+    EvHeartbeatTimeout -> do
+        whenS _nsRole (== Leader) $ do
+            sendHeartbeats
+            lift startHeartbeatTimer
 
--- Send message to every pear
+-- Send message to every peer
 broadcast :: MonadRaft m => Message -> NodeT m ()
 broadcast msg = do
     ns <- get
@@ -206,8 +213,6 @@ stepForward = do
         & nsVotedFor .~ (Just $ ns ^. nsNodeId)
         & nsVotes .~ (M.insert (ns ^. nsNodeId) True $ blankVotes $ S.toList (ns ^. nsPeers))
         )
-
-    sendVoteRequests
 
 -- Change role from Candidate to Leader
 lead :: MonadRaft m => NodeT m ()

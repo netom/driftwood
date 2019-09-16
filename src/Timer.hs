@@ -3,7 +3,6 @@ module Timer
     , new
     , start
     , stop
-    , restart
     ) where
 
 import           Control.Concurrent
@@ -21,18 +20,6 @@ new delayRange action = do
     ref <- newIORef Nothing
     return $ Timer ref delayRange action
 
-start :: Timer -> IO ()
-start t = do
-    mbTId <- readIORef $ tmTId t
-    case mbTId of
-        Just _ -> return ()
-        _ -> do
-            g <- newStdGen
-            let (d1, d2) = tmDelay t
-            let (delay, _) = randomR (d1, d2) g
-            tId <- forkIO $ threadDelay delay >> tmAction t
-            writeIORef (tmTId t) $ Just tId
-
 stop :: Timer -> IO ()
 stop t = do
     mbTId <- readIORef $ tmTId t
@@ -42,7 +29,11 @@ stop t = do
             writeIORef (tmTId t) Nothing
         _ -> return ()
 
-restart :: Timer -> IO ()
-restart t = do
+start :: Timer -> IO ()
+start t = do
     stop t
-    start t
+    g <- newStdGen
+    let (d1, d2) = tmDelay t
+    let (delay, _) = randomR (d1, d2) g
+    tId <- forkIO $ threadDelay delay >> tmAction t
+    writeIORef (tmTId t) $ Just tId

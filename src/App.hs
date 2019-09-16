@@ -113,7 +113,7 @@ instance MonadRaft AppT where
 
     resetElectionTimer = do
         app <- ask
-        liftIO $ restart (appElectionTimer app)
+        liftIO $ start (appElectionTimer app)
 
     startHeartbeatTimer = do
         app <- ask

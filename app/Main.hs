@@ -165,8 +165,13 @@ processOptions options = do
 
         appChan <- liftIO newTChanIO
 
-        appElectionTimer <- liftIO $ new (500000, 1000000) undefined -- TODO: send event to TCHan
-        appHeartbeatTimer <- liftIO $ new (500000, 1000000) undefined -- TODO: send event to TCHan
+        appElectionTimer <- liftIO $ new (500000, 1000000) $ do
+            runWithOptions options $ logDebug "Election timeout"
+            atomically $ writeTChan appChan $ EvElectionTimeout
+
+        appHeartbeatTimer <- liftIO $ new (300000, 300000) $ do
+            runWithOptions options $ logDebug "Heartbeat timeout"
+            atomically $ writeTChan appChan $ EvHeartbeatTimeout
 
         return App{..}
 
@@ -191,9 +196,16 @@ main = do
         lift $ logInfo "Listening to incoming messages..."
 
         sock <- asks appSocket
-        liftIO $ forever $ do
+        liftIO $ forkIO $ forever $ do
             recv sock 4096 >>= \message -> runApp app $ do
                 let msg = decode $ BSL.fromStrict message
-                logInfo $ show msg
+                logDebug $ show msg
                 ch <- asks appChan
                 liftIO $ atomically $ writeTChan ch $ EvMessage msg
+
+        forever $ do
+            ch <- asks appChan
+            ev <- liftIO $ atomically $ readTChan ch
+            logDebug $ show ev
+            processEvent ev
+            return ()
