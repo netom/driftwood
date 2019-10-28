@@ -93,7 +93,7 @@ options = info
                 $  long "node"
                 <> short 'n'
                 <> metavar "NODE"
-                <> help "An other node in the network."
+                <> help "Add another node in the network."
                 )
             <*> (  option auto
                 $  long "loglevel"
